@@ -1,0 +1,2 @@
+# Ensure shell scripts always use LF line endings on Linux/VPS
+*.sh text eol=lf

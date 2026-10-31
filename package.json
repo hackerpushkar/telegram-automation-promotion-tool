@@ -1,0 +1,12 @@
+{
+  "name": "telegram-promotion-tool",
+  "version": "1.0.0",
+  "description": "Telegram Promotion Tool & Lead Extraction Engine Dashboard",
+  "scripts": {
+    "dev": "python -c \"import webbrowser; webbrowser.open('http://localhost:8000')\" && python src/main.py",
+    "start": "python src/main.py",
+    "open": "python -c \"import webbrowser; webbrowser.open('http://localhost:8000')\""
+  },
+  "author": "ProAffiliaters",
+  "license": "ISC"
+}

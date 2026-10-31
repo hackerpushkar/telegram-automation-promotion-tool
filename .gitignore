@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Environment files with sensitive credentials
+.env
+!.env.example
+
+# Telegram MTProto session files
+*.session
+*.session-journal
+
+# Logs
+*.log
+logs/
+
+# Node / PM2 runtime files
+node_modules/
+npm-debug.log*
+.pm2/
+*.pid
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
