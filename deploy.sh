@@ -135,12 +135,18 @@ EOF
 setup_ssl_certbot() {
   log_step "Setting up Let's Encrypt SSL Certificate for $APP_DOMAIN"
 
+  # Automatically ensure Nginx reverse proxy is configured and active first
+  if [ ! -f "$NGINX_SITE_LINK" ] || [ ! -f "$NGINX_SITE_CONF" ]; then
+    log_info "Nginx server block for $APP_DOMAIN not found. Automatically setting up Nginx first..."
+    setup_nginx_proxy
+  fi
+
   if ! command -v certbot > /dev/null 2>&1; then
     log_warn "Certbot not found. Attempting to install certbot and python3-certbot-nginx..."
     sudo apt update && sudo apt install -y certbot python3-certbot-nginx
   fi
 
-  log_info "Requesting SSL certificate for $APP_DOMAIN..."
+  log_info "Requesting & installing SSL certificate for $APP_DOMAIN..."
   sudo certbot --nginx -d "$APP_DOMAIN" --non-interactive --agree-tos --redirect --register-unsafely-without-email || \
   sudo certbot --nginx -d "$APP_DOMAIN" --redirect
 
