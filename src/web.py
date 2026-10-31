@@ -1052,8 +1052,7 @@ LOGIN_HTML_CONTENT = """<!DOCTYPE html>
             type="email"
             id="login-email"
             class="form-input"
-            placeholder="admin@proaffiliaters.com"
-            value="spushkar812@gmail.com"
+            placeholder="Enter admin email address"
             required
             autocomplete="email"
           />
@@ -1068,8 +1067,7 @@ LOGIN_HTML_CONTENT = """<!DOCTYPE html>
             type="password"
             id="login-password"
             class="form-input"
-            placeholder="••••••••"
-            value="Pushkar@9084"
+            placeholder="Enter dashboard password"
             required
             autocomplete="current-password"
           />
@@ -4751,6 +4749,11 @@ Backups: https://t.me/DealBackups</textarea>
         const data = await res.json();
         if (!data.authenticated) {
           window.location.href = '/login';
+        } else if (data.email) {
+          const topEmail = document.getElementById('topbar-user-email');
+          const sideEmail = document.getElementById('sidebar-user-email');
+          if (topEmail) topEmail.textContent = data.email;
+          if (sideEmail) sideEmail.textContent = data.email;
         }
       } catch (e) {}
     }
