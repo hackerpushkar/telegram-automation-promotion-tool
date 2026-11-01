@@ -3404,6 +3404,7 @@ Backups: https://t.me/DealBackups</textarea>
       if (tabId === 'tab-bot-outreach') loadBotOutreachData();
       if (tabId === 'tab-accounts') loadAccounts();
       if (tabId === 'tab-drip-funnel') loadDripOverview();
+      if (tabId === 'tab-keywords') loadKeywordsData();
     }
 
     function toggleSidebar(open) {
@@ -4510,8 +4511,8 @@ Backups: https://t.me/DealBackups</textarea>
           const lastStr = k.last_searched_at ? new Date(k.last_searched_at).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : 'Never';
           const isEnabled = k.enabled !== false;
           const statusBadge = isEnabled 
-            ? '<span class="status-chip chip-active" style="cursor:pointer;" onclick="toggleKeywordStatus(\'' + k.keyword + '\', false)">🟢 Active</span>'
-            : '<span class="status-chip chip-ignored" style="cursor:pointer;" onclick="toggleKeywordStatus(\'' + k.keyword + '\', true)">⏸️ Paused</span>';
+            ? `<span class="status-chip chip-active" style="cursor:pointer;" onclick="toggleKeywordStatus('${k.keyword}', false)">🟢 Active</span>`
+            : `<span class="status-chip chip-ignored" style="cursor:pointer;" onclick="toggleKeywordStatus('${k.keyword}', true)">⏸️ Paused</span>`;
           
           return `
             <tr>
