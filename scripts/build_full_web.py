@@ -1,8 +1,8 @@
-# Builder script to assemble the production src/web.py cleanly
+# Upgraded Production Web UI Builder with Bug Fixes & Premium Modern SaaS Design
 import os
 import sys
 
-def generate_web_py():
+def build_web_ui():
     with open("src/web.py", "r", encoding="utf-8") as f:
         original = f.read()
 
@@ -15,7 +15,7 @@ def generate_web_py():
 
     login_html_block = original[login_idx:html_content_idx].strip()
 
-    # Define backend code (FastAPI routes + schemas)
+    # Backend Python server code
     backend_code = '''import os
 import csv
 import io
@@ -200,9 +200,9 @@ async def get_dashboard_stats():
     accounts = await Database.get_all_telegram_accounts()
     reports_analytics = await Database.get_sending_reports_analytics()
 
-    userbots_count = sum(1 for l in leads if l.get("lead_type") == "bot" or (l.get("username", "").lower().endswith("bot")))
-    usernames_count = sum(1 for l in leads if l.get("lead_type") == "user" and not (l.get("username", "").lower().endswith("bot")))
-    contacted_count = sum(1 for l in leads if l.get("status") in ["contacted", "replied", "converted"])
+    userbots_count = sum(1 for l in leads if l.get("lead_type") == "bot" or (str(l.get("username", "")).lower().endswith("bot")))
+    usernames_count = sum(1 for l in leads if l.get("lead_type") == "user" and not (str(l.get("username", "")).lower().endswith("bot")))
+    contacted_count = sum(1 for l in leads if str(l.get("status", "")).lower() in ["contacted", "replied", "converted"])
 
     active_accounts = sum(1 for a in accounts if a.get("is_authorized", True))
 
@@ -211,7 +211,7 @@ async def get_dashboard_stats():
         "userbots_count": userbots_count,
         "usernames_count": usernames_count,
         "contacted_count": contacted_count,
-        "pending_count": len(leads) - contacted_count,
+        "pending_count": max(0, len(leads) - contacted_count),
         "total_accounts": len(accounts),
         "active_accounts": active_accounts,
         "messages_sent_today": reports_analytics.get("sent_today", 0),
@@ -229,7 +229,7 @@ async def list_leads(
     search: Optional[str] = Query(None),
     lead_type: Optional[str] = Query("all"),
     status: Optional[str] = Query("all"),
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(300, ge=1, le=1000),
     skip: int = Query(0, ge=0)
 ):
     """Returns filtered leads."""
@@ -406,7 +406,7 @@ async def stop_sending_campaign():
 # 5. Section 3: Login Accounts
 @app.get("/api/accounts")
 async def get_accounts_list():
-    """Returns all registered Telegram accounts and their slot assignments."""
+    """Returns all registered Telegram accounts."""
     accounts = await Database.get_all_telegram_accounts()
     safe_accounts = []
     for acc in accounts:
@@ -570,18 +570,18 @@ async def serve_dashboard(request: Request):
 
 '''
 
-    # Build the HTML_CONTENT with the EXACT 4 Sections
-    html_content = generate_frontend_html()
+    # Generate the modern, sleek, high-end 4-Section HTML
+    html_content = generate_enhanced_frontend_html()
 
     full_file_content = backend_code + "\n" + login_html_block + "\n\nHTML_CONTENT = \"\"\"" + html_content + "\"\"\"\n"
 
     with open("src/web.py", "w", encoding="utf-8") as f:
         f.write(full_file_content)
 
-    print("Successfully built src/web.py!")
+    print("Successfully built enhanced src/web.py!")
     return True
 
-def generate_frontend_html():
+def generate_enhanced_frontend_html():
     return r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -590,403 +590,484 @@ def generate_frontend_html():
   <title>ProAffiliaters | Telegram Lead Engine</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
       theme: {
         extend: {
           fontFamily: {
-            sans: ['Inter', 'sans-serif'],
+            sans: ['"Plus Jakarta Sans"', 'sans-serif'],
             display: ['Outfit', 'sans-serif'],
           },
           colors: {
-            primary: {
-              50: '#eff6ff',
-              100: '#dbeafe',
-              500: '#3b82f6',
-              600: '#2563eb',
-              700: '#1d4ed8',
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              200: '#c7d2fe',
+              500: '#4f46e5',
+              600: '#4338ca',
+              700: '#3730a3',
             }
+          },
+          boxShadow: {
+            'card': '0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05)',
+            'card-hover': '0 10px 15px -3px rgba(0, 0, 0, 0.07), 0 4px 6px -4px rgba(0, 0, 0, 0.05)',
+            'nav-active': '0 4px 12px rgba(79, 70, 229, 0.25)',
           }
         }
       }
     }
   </script>
   <style>
-    body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+    body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #1e293b; }
     .font-display { font-family: 'Outfit', sans-serif; }
-    .nav-item.active { background-color: #eff6ff; color: #2563eb; font-weight: 600; }
-    .nav-item.active svg { color: #2563eb; }
-    /* Custom scrollbar */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    
+    /* Clean Active Navigation Item */
+    .nav-item.active {
+      background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
+      color: #ffffff !important;
+      box-shadow: 0 4px 14px 0 rgba(79, 70, 229, 0.35);
+      font-weight: 700;
+    }
+    .nav-item.active svg { color: #ffffff !important; }
+    .nav-item.active .nav-badge {
+      background: rgba(255, 255, 255, 0.22) !important;
+      color: #ffffff !important;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: #f1f5f9; }
     ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
     ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
   </style>
 </head>
-<body class="min-h-screen text-slate-800 flex flex-col">
+<body class="min-h-screen text-slate-800 flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
 
   <!-- Toast Notification Container -->
   <div id="toast-container" class="fixed top-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
-  <div class="flex-1 flex overflow-hidden min-h-screen">
+  <div class="flex-1 flex min-h-screen">
 
-    <!-- SIDEBAR (EXACTLY 4 SECTIONS) -->
-    <aside class="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
+    <!-- ======================================================== -->
+    <!-- SIDEBAR: EXACTLY 4 PRODUCTION SECTIONS (NO TEXT WRAP)   -->
+    <!-- ======================================================== -->
+    <aside class="w-72 bg-white border-r border-slate-200/90 flex flex-col shrink-0 select-none">
+      
       <!-- Logo Header -->
-      <div class="h-16 flex items-center px-6 border-b border-slate-100 gap-3">
-        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white font-display font-extrabold text-lg shadow-sm">
+      <div class="h-20 flex items-center px-6 border-b border-slate-100 gap-3.5">
+        <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-indigo-600 via-indigo-700 to-blue-600 flex items-center justify-center text-white font-display font-black text-xl shadow-md shadow-indigo-500/25">
           P
         </div>
         <div>
-          <div class="font-display font-bold text-slate-900 leading-tight flex items-center gap-1.5">
+          <div class="font-display font-extrabold text-slate-900 text-base leading-tight flex items-center gap-1.5">
             ProAffiliaters
-            <span class="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200">PRO</span>
+            <span class="text-[9px] uppercase font-black tracking-wider px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200/60">PRO</span>
           </div>
-          <div class="text-[11px] text-slate-400 font-medium">Telegram Lead Engine</div>
+          <div class="text-[11px] text-slate-400 font-semibold tracking-wide">Telegram Lead Engine</div>
         </div>
       </div>
 
       <!-- Navigation Menu -->
-      <div class="p-3 text-[11px] font-bold text-slate-400 uppercase tracking-wider px-4 pt-4">Navigation</div>
-      <nav class="space-y-1 px-3 flex-1">
-        <!-- 1. Leads -->
-        <button id="nav-btn-leads" onclick="switchTab('tab-leads')" class="nav-item active w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-all">
-          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
-          <span>Leads</span>
-          <span id="nav-leads-badge" class="ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">0</span>
+      <div class="px-5 pt-6 pb-2 text-[11px] font-bold text-slate-400 uppercase tracking-wider">Outreach Pipeline</div>
+      
+      <nav class="space-y-1.5 px-3 flex-1">
+        
+        <!-- Tab 1: Leads -->
+        <button id="nav-btn-leads" onclick="switchTab('tab-leads')" class="nav-item active w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all whitespace-nowrap">
+          <svg class="w-5 h-5 shrink-0 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+          </svg>
+          <span class="truncate">Leads Directory</span>
+          <span id="nav-leads-badge" class="nav-badge ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-white/20 text-white">0</span>
         </button>
 
-        <!-- 2. Manual Sending -->
-        <button id="nav-btn-sending" onclick="switchTab('tab-sending')" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-all">
-          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
-          <span>Manual Sending</span>
-          <span id="nav-sending-badge" class="ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Rotation</span>
+        <!-- Tab 2: Manual Sending -->
+        <button id="nav-btn-sending" onclick="switchTab('tab-sending')" class="nav-item w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-all whitespace-nowrap">
+          <svg class="w-5 h-5 shrink-0 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+          </svg>
+          <span class="truncate">Manual Sending</span>
+          <span id="nav-sending-badge" class="nav-badge ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Rotation</span>
         </button>
 
-        <!-- 3. Login Accounts -->
-        <button id="nav-btn-accounts" onclick="switchTab('tab-accounts')" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-all">
-          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
-          <span>Login Accounts</span>
-          <span id="nav-accounts-badge" class="ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">0 Active</span>
+        <!-- Tab 3: Login Accounts -->
+        <button id="nav-btn-accounts" onclick="switchTab('tab-accounts')" class="nav-item w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-all whitespace-nowrap">
+          <svg class="w-5 h-5 shrink-0 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+          </svg>
+          <span class="truncate">Login Accounts</span>
+          <span id="nav-accounts-badge" class="nav-badge ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200/60">0 Active</span>
         </button>
 
-        <!-- 4. Automatic Sending Report -->
-        <button id="nav-btn-reports" onclick="switchTab('tab-reports')" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-all">
-          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-          <span>Sending Reports</span>
-          <span id="nav-reports-badge" class="ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">0</span>
+        <!-- Tab 4: Automatic Sending Report -->
+        <button id="nav-btn-reports" onclick="switchTab('tab-reports')" class="nav-item w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-all whitespace-nowrap">
+          <svg class="w-5 h-5 shrink-0 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+          </svg>
+          <span class="truncate">Sending Reports</span>
+          <span id="nav-reports-badge" class="nav-badge ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">0</span>
         </button>
+
       </nav>
 
-      <!-- Sidebar Footer Status -->
-      <div class="p-4 border-t border-slate-100 text-xs space-y-2 bg-slate-50/50">
-        <div class="flex items-center gap-2 text-slate-600">
-          <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-          <span class="font-medium">30m Polling Active</span>
+      <!-- Sidebar Footer Status Card -->
+      <div class="p-4 mx-3 mb-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-2 text-xs">
+        <div class="flex items-center gap-2 text-slate-700 font-semibold">
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+          <span>30m Polling Active</span>
         </div>
-        <div class="text-slate-400 text-[11px] truncate" id="sidebar-user-email">spushkar812@gmail.com</div>
-        <a href="/logout" class="block text-red-500 hover:text-red-600 font-medium text-[11px] pt-1">Sign Out &rarr;</a>
+        <div class="text-slate-400 text-[11px] truncate font-mono" id="sidebar-user-email">spushkar812@gmail.com</div>
+        <div class="pt-1 border-t border-slate-200/60 flex items-center justify-between">
+          <span class="text-[10px] text-slate-400 font-semibold uppercase">Engine Online</span>
+          <a href="/logout" class="text-red-500 hover:text-red-600 font-bold text-xs hover:underline">Sign Out &rarr;</a>
+        </div>
       </div>
+
     </aside>
 
-    <!-- MAIN CONTENT WRAPPER -->
+    <!-- ======================================================== -->
+    <!-- MAIN CONTENT AREA                                        -->
+    <!-- ======================================================== -->
     <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
 
-      <!-- TOP BAR -->
-      <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-30">
+      <!-- TOP STICKY BAR -->
+      <header class="h-20 bg-white/90 backdrop-blur-md border-b border-slate-200/90 flex items-center justify-between px-8 sticky top-0 z-30">
         <div>
-          <h1 id="header-breadcrumb" class="font-display font-bold text-lg text-slate-900">ProAffiliaters / Leads</h1>
+          <div class="text-xs font-bold uppercase tracking-wider text-slate-400">Section View</div>
+          <h1 id="header-breadcrumb" class="font-display font-extrabold text-xl text-slate-900 flex items-center gap-2">
+            ProAffiliaters <span class="text-slate-300">/</span> <span class="text-indigo-600">Leads Directory</span>
+          </h1>
         </div>
 
         <div class="flex items-center gap-3">
-          <div class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
-            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <!-- Active Senders Pill -->
+          <div class="hidden sm:flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200/70 text-xs font-bold shadow-2xs">
+            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
             <span id="top-accounts-status">0 Sending Accounts Ready</span>
           </div>
 
-          <button onclick="refreshCurrentTab()" title="Refresh" class="p-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 transition-all">
+          <!-- Refresh Button -->
+          <button onclick="refreshCurrentTab()" title="Refresh Data" class="p-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 shadow-2xs transition-all active:scale-95">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
           </button>
 
-          <button onclick="triggerSyncNow()" class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-xs font-semibold shadow-sm transition-all">
+          <!-- Sync API Now Button -->
+          <button onclick="triggerSyncNow()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white text-xs font-bold shadow-sm shadow-indigo-500/25 transition-all active:scale-95">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
             <span>Sync API Now</span>
           </button>
         </div>
       </header>
 
-      <!-- CONTENT PANELS -->
+      <!-- PANELS WRAPPER -->
       <div class="p-8 max-w-7xl mx-auto w-full flex-1">
 
-        <!-- ========================================== -->
-        <!-- SECTION 1: LEADS TAB                       -->
-        <!-- ========================================== -->
-        <section id="tab-leads" class="tab-content space-y-6">
-          <!-- Header and Sub-tabs -->
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
+        <!-- ======================================================== -->
+        <!-- SECTION 1: LEADS DIRECTORY (USERBOTS & USERNAMES TABS)   -->
+        <!-- ======================================================== -->
+        <section id="tab-leads" class="tab-content space-y-7">
+          
+          <!-- Section Header & Segmented Subtab Switch -->
+          <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-5 pb-2">
             <div>
-              <h2 class="text-2xl font-display font-bold text-slate-900">Leads Management</h2>
-              <p class="text-sm text-slate-500 mt-0.5">Segmented deal channel userbots and human admin usernames extracted from external deal sources.</p>
+              <h2 class="text-2xl font-display font-extrabold text-slate-900 tracking-tight">Leads Directory</h2>
+              <p class="text-sm text-slate-500 mt-1">Manage deal channel userbots and human admin usernames extracted from external sources.</p>
             </div>
 
-            <!-- Sub-tabs: Userbots vs Usernames -->
-            <div class="inline-flex p-1 bg-slate-100 rounded-xl border border-slate-200">
-              <button id="subtab-btn-userbots" onclick="switchLeadSubTab('bot')" class="px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white shadow-sm transition-all flex items-center gap-2">
+            <!-- Segmented Subtabs Pill -->
+            <div class="inline-flex p-1.5 bg-slate-200/70 rounded-2xl border border-slate-300/60 shadow-inner select-none self-start lg:self-auto">
+              <button id="subtab-btn-userbots" onclick="switchLeadSubTab('bot')" class="px-5 py-2.5 text-xs font-bold rounded-xl bg-indigo-600 text-white shadow-sm flex items-center gap-2.5 transition-all">
                 <span>🤖 Userbots</span>
-                <span id="badge-count-userbots" class="text-xs px-2 py-0.5 rounded-full bg-white/20 text-white font-bold">0</span>
+                <span id="badge-count-userbots" class="px-2 py-0.5 rounded-full bg-white/25 text-white text-[11px] font-extrabold">0</span>
               </button>
-              <button id="subtab-btn-usernames" onclick="switchLeadSubTab('user')" class="px-4 py-2 text-sm font-medium rounded-lg text-slate-600 hover:bg-slate-200 transition-all flex items-center gap-2">
+              <button id="subtab-btn-usernames" onclick="switchLeadSubTab('user')" class="px-5 py-2.5 text-xs font-semibold rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 flex items-center gap-2.5 transition-all">
                 <span>👤 Usernames</span>
-                <span id="badge-count-usernames" class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold">0</span>
+                <span id="badge-count-usernames" class="px-2 py-0.5 rounded-full bg-slate-300 text-slate-700 text-[11px] font-extrabold">0</span>
               </button>
             </div>
           </div>
 
-          <!-- Quick Stats Cards -->
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
-              <div class="w-12 h-12 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xl">🤖</div>
-              <div>
-                <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Userbots</div>
-                <div id="leads-stat-userbots" class="text-2xl font-display font-extrabold text-slate-900">0</div>
-                <div class="text-[11px] text-slate-400">Automated deal forwarding bots</div>
+          <!-- 3 Modern Metric KPI Cards -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-5">
+            
+            <!-- Card 1: Total Userbots -->
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card hover:shadow-card-hover transition-all flex items-center gap-5 relative overflow-hidden group">
+              <div class="w-14 h-14 rounded-2xl bg-indigo-50 text-indigo-600 border border-indigo-100 flex items-center justify-center font-bold text-2xl group-hover:scale-110 transition-transform">
+                🤖
               </div>
+              <div>
+                <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Total Userbots</div>
+                <div id="leads-stat-userbots" class="text-3xl font-display font-extrabold text-slate-900 mt-0.5">0</div>
+                <div class="text-[11px] text-slate-400 mt-0.5 font-medium">Automated deal forwarding bots</div>
+              </div>
+              <div class="absolute top-0 right-0 w-24 h-24 bg-indigo-500/5 rounded-full blur-2xl pointer-events-none"></div>
             </div>
 
-            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
-              <div class="w-12 h-12 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center font-bold text-xl">👤</div>
-              <div>
-                <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Usernames</div>
-                <div id="leads-stat-usernames" class="text-2xl font-display font-extrabold text-slate-900">0</div>
-                <div class="text-[11px] text-slate-400">Channel admins & business managers</div>
+            <!-- Card 2: Total Usernames -->
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card hover:shadow-card-hover transition-all flex items-center gap-5 relative overflow-hidden group">
+              <div class="w-14 h-14 rounded-2xl bg-purple-50 text-purple-600 border border-purple-100 flex items-center justify-center font-bold text-2xl group-hover:scale-110 transition-transform">
+                👤
               </div>
+              <div>
+                <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Total Usernames</div>
+                <div id="leads-stat-usernames" class="text-3xl font-display font-extrabold text-slate-900 mt-0.5">0</div>
+                <div class="text-[11px] text-slate-400 mt-0.5 font-medium">Channel owners & deal curators</div>
+              </div>
+              <div class="absolute top-0 right-0 w-24 h-24 bg-purple-500/5 rounded-full blur-2xl pointer-events-none"></div>
             </div>
 
-            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
-              <div class="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold text-xl">✅</div>
-              <div>
-                <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Contacted Leads</div>
-                <div id="leads-stat-contacted" class="text-2xl font-display font-extrabold text-slate-900">0</div>
-                <div class="text-[11px] text-slate-400">Reached via promotional messages</div>
+            <!-- Card 3: Contacted Leads -->
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card hover:shadow-card-hover transition-all flex items-center gap-5 relative overflow-hidden group">
+              <div class="w-14 h-14 rounded-2xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center font-bold text-2xl group-hover:scale-110 transition-transform">
+                ✅
               </div>
+              <div>
+                <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Contacted Leads</div>
+                <div id="leads-stat-contacted" class="text-3xl font-display font-extrabold text-slate-900 mt-0.5">0</div>
+                <div class="text-[11px] text-slate-400 mt-0.5 font-medium">Successfully reached via promos</div>
+              </div>
+              <div class="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-2xl pointer-events-none"></div>
             </div>
+
           </div>
 
-          <!-- Controls Bar -->
-          <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+          <!-- Controls Bar (Search, Status Filter, Add, Export) -->
+          <div class="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-card flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3.5">
             <div class="flex flex-1 items-center gap-3">
               <!-- Search -->
               <div class="relative flex-1 max-w-md">
                 <svg class="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                <input id="leads-search-input" oninput="debounceLeadsSearch()" type="text" placeholder="Search by @username or channel source..." class="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all">
+                <input id="leads-search-input" oninput="debounceLeadsSearch()" type="text" placeholder="Search by @username or channel source..." class="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all font-medium">
               </div>
 
               <!-- Status Filter -->
-              <select id="leads-status-select" onchange="loadLeads()" class="py-2 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <select id="leads-status-select" onchange="loadLeads()" class="py-2.5 px-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer">
                 <option value="all">All Outreach Statuses</option>
-                <option value="pending">Pending</option>
-                <option value="contacted">Contacted</option>
-                <option value="replied">Replied</option>
-                <option value="converted">Converted</option>
-                <option value="ignored">Ignored</option>
+                <option value="pending">⏳ Pending</option>
+                <option value="contacted">✉️ Contacted</option>
+                <option value="replied">💬 Replied</option>
+                <option value="converted">🏆 Converted</option>
+                <option value="ignored">🚫 Ignored</option>
               </select>
             </div>
 
             <div class="flex items-center gap-2.5">
-              <button onclick="openAddLeadModal()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm transition-all">
+              <button onclick="openAddLeadModal()" class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm shadow-indigo-500/20 transition-all active:scale-95">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                 <span>Add Lead</span>
               </button>
 
-              <button onclick="exportLeadsCsv()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-all">
+              <button onclick="exportLeadsCsv()" class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-all active:scale-95">
                 <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
                 <span>Export CSV</span>
               </button>
             </div>
           </div>
 
-          <!-- Leads Data Table -->
-          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <!-- Dynamic Leads Data Table -->
+          <div class="bg-white rounded-3xl border border-slate-200/80 shadow-card overflow-hidden">
             <div class="overflow-x-auto">
               <table class="w-full text-left text-sm">
-                <thead class="bg-slate-50/75 border-b border-slate-200 text-slate-500 uppercase text-[11px] font-semibold tracking-wider">
+                <thead class="bg-slate-50/80 border-b border-slate-200/80 text-slate-500 uppercase text-[11px] font-bold tracking-wider">
                   <tr>
-                    <th class="py-3.5 px-6">Lead Handle</th>
-                    <th class="py-3.5 px-4">Classification</th>
-                    <th class="py-3.5 px-4">Discovered Source</th>
-                    <th class="py-3.5 px-4">Outreach Status</th>
-                    <th class="py-3.5 px-4">Discovered Date</th>
-                    <th class="py-3.5 px-6 text-right">Actions</th>
+                    <th class="py-4 px-6">Lead Handle</th>
+                    <th class="py-4 px-4">Classification</th>
+                    <th class="py-4 px-4">Discovered Source</th>
+                    <th class="py-4 px-4">Outreach Status</th>
+                    <th class="py-4 px-4">Discovered Date</th>
+                    <th class="py-4 px-6 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody id="leads-table-body" class="divide-y divide-slate-100">
                   <tr>
-                    <td colspan="6" class="py-12 text-center text-slate-400">Loading leads data...</td>
+                    <td colspan="6" class="py-16 text-center text-slate-400">Loading leads...</td>
                   </tr>
                 </tbody>
               </table>
             </div>
 
             <!-- Table Footer -->
-            <div class="p-4 bg-slate-50/50 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-              <div id="leads-pagination-info">Showing 0 leads</div>
+            <div class="p-4 bg-slate-50/60 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+              <div id="leads-pagination-info" class="font-semibold text-slate-600">Showing 0 leads</div>
               <div class="flex gap-2">
-                <button onclick="prevLeadsPage()" id="btn-leads-prev" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white font-medium hover:bg-slate-50 disabled:opacity-50">Previous</button>
-                <button onclick="nextLeadsPage()" id="btn-leads-next" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white font-medium hover:bg-slate-50 disabled:opacity-50">Next</button>
+                <button onclick="prevLeadsPage()" id="btn-leads-prev" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white font-semibold hover:bg-slate-50 disabled:opacity-40 transition-all">Previous</button>
+                <button onclick="nextLeadsPage()" id="btn-leads-next" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white font-semibold hover:bg-slate-50 disabled:opacity-40 transition-all">Next</button>
               </div>
             </div>
           </div>
+
         </section>
 
 
-        <!-- ========================================== -->
-        <!-- SECTION 2: MANUAL SENDING TAB              -->
-        <!-- ========================================== -->
-        <section id="tab-sending" class="tab-content hidden space-y-6">
-          <div class="pb-2 border-b border-slate-200">
-            <h2 class="text-2xl font-display font-bold text-slate-900">Manual Promotional Sending</h2>
-            <p class="text-sm text-slate-500 mt-0.5">Compose promotional messages and dispatch to leads with automatic multi-account round-robin rotation and flood-wait protection.</p>
+        <!-- ======================================================== -->
+        <!-- SECTION 2: MANUAL SENDING WITH ACCOUNT ROTATION          -->
+        <!-- ======================================================== -->
+        <section id="tab-sending" class="tab-content hidden space-y-7">
+          
+          <div class="pb-2">
+            <h2 class="text-2xl font-display font-extrabold text-slate-900 tracking-tight">Manual Promotional Sending</h2>
+            <p class="text-sm text-slate-500 mt-1">Compose promotional posts and dispatch to leads with automatic multi-account round-robin rotation and flood-wait protection.</p>
           </div>
 
           <!-- Two Column Composer & Config Layout -->
-          <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-7">
 
             <!-- LEFT: POST COMPOSER (7 COLS) -->
-            <div class="lg:col-span-7 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
-              <div class="flex items-center justify-between pb-3 border-b border-slate-100">
-                <h3 class="font-display font-bold text-slate-900 flex items-center gap-2">
+            <div class="lg:col-span-7 bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-5">
+              
+              <div class="flex items-center justify-between pb-4 border-b border-slate-100">
+                <h3 class="font-display font-bold text-slate-900 text-base flex items-center gap-2">
                   <span>✍️ Compose Promotional Post</span>
                 </h3>
-                <!-- Saved Templates Dropdown -->
+                
+                <!-- Saved Templates Loader -->
                 <div class="flex items-center gap-2">
-                  <select id="composer-template-select" onchange="onTemplateSelected()" class="text-xs py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-lg text-slate-700 font-medium focus:ring-1 focus:ring-blue-500">
+                  <select id="composer-template-select" onchange="onTemplateSelected()" class="text-xs py-2 px-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-700 font-semibold focus:ring-2 focus:ring-indigo-500">
                     <option value="">-- Load Saved Template --</option>
                   </select>
-                  <button onclick="deleteSelectedTemplate()" title="Delete Template" class="p-1.5 text-slate-400 hover:text-red-500 rounded-lg border border-slate-200 hover:bg-slate-50">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                  <button onclick="deleteSelectedTemplate()" title="Delete Template" class="p-2 text-slate-400 hover:text-red-500 rounded-xl border border-slate-200 hover:bg-red-50 transition-all">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                   </button>
                 </div>
               </div>
 
               <!-- Post Title -->
               <div>
-                <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Post Title / Campaign Name</label>
-                <input id="post-title" type="text" placeholder="e.g. ProAffiliaters Exclusive Deal Promotion" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all">
+                <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Post Title / Template Name</label>
+                <input id="post-title" type="text" placeholder="e.g. Exclusive Festive Deal Offer" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all">
               </div>
 
               <!-- Promotional Message Textarea -->
               <div>
                 <div class="flex items-center justify-between mb-1.5">
-                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider">Promotional Message Content</label>
-                  <span class="text-[11px] text-slate-400">Telegram Markdown (*bold*, _italic_, [link](url))</span>
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider">Message Content</label>
+                  <span class="text-[11px] text-slate-400 font-mono">*bold* _italic_ [link](url)</span>
                 </div>
-                <textarea id="post-message-text" rows="7" placeholder="Write your compelling promotional offer message here...&#10;&#10;🔥 *Exclusive Deal:* Join India's #1 Affiliate Network!&#10;👉 Highest commissions & instant daily payouts.&#10;Click the link below to get started!" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"></textarea>
+                <textarea id="post-message-text" oninput="updateTelegramBubblePreview()" rows="6" placeholder="Write promotional copy here...&#10;&#10;🔥 *Special Affiliate Offer:* Join India's top deal automation platform!&#10;👉 High commission rates & instant payouts." class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-sans focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all"></textarea>
               </div>
 
               <!-- Image URL & Preview -->
               <div>
-                <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Image / Banner URL (Optional)</label>
-                <input id="post-image-url" oninput="updateImagePreview()" type="url" placeholder="https://example.com/banner.jpg" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all">
-                <div id="image-preview-container" class="hidden mt-3 p-2 bg-slate-50 border border-slate-200 rounded-xl max-w-xs">
-                  <img id="image-preview-img" src="" alt="Post Preview" class="rounded-lg max-h-40 w-auto object-cover">
+                <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Banner Image URL (Optional)</label>
+                <input id="post-image-url" oninput="updateImagePreview(); updateTelegramBubblePreview();" type="url" placeholder="https://example.com/promo.jpg" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all">
+              </div>
+
+              <!-- Inline Button Inputs -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
+                <div>
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Button Text (Optional)</label>
+                  <input id="post-button-text" oninput="updateTelegramBubblePreview()" type="text" placeholder="e.g. 🚀 Join VIP Deals" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Button URL (Optional)</label>
+                  <input id="post-button-url" oninput="updateTelegramBubblePreview()" type="url" placeholder="https://t.me/proaffiliaters" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
                 </div>
               </div>
 
-              <!-- Inline Button Options -->
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                <div>
-                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Button Text (Optional)</label>
-                  <input id="post-button-text" type="text" placeholder="e.g. 🚀 Join VIP Deals Group" class="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                </div>
-                <div>
-                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Button Target Link (Optional)</label>
-                  <input id="post-button-url" type="url" placeholder="e.g. https://t.me/proaffiliaters" class="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <!-- Telegram Chat Bubble Mockup Preview -->
+              <div class="pt-2">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Telegram Client Chat Preview</div>
+                <div class="p-4 bg-slate-100 rounded-2xl border border-slate-200/80">
+                  <div class="max-w-sm bg-white rounded-2xl p-3.5 shadow-sm border border-slate-200/70 space-y-2.5">
+                    <div id="preview-bubble-image-box" class="hidden rounded-xl overflow-hidden max-h-40 bg-slate-100">
+                      <img id="preview-bubble-img" src="" alt="Promo banner" class="w-full object-cover">
+                    </div>
+                    <div id="preview-bubble-text" class="text-xs text-slate-800 whitespace-pre-wrap leading-relaxed font-sans">
+                      Message preview will appear here...
+                    </div>
+                    <div id="preview-bubble-btn-box" class="hidden pt-1">
+                      <div id="preview-bubble-btn-label" class="w-full py-2 px-3 text-center rounded-xl bg-blue-50 text-blue-600 font-bold text-xs border border-blue-200 shadow-2xs">
+                        🚀 Button Preview
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
               <!-- Save Template Button -->
               <div class="pt-2 flex justify-end">
-                <button onclick="savePostTemplate()" class="flex items-center gap-2 px-4 py-2 rounded-xl border border-blue-600 text-blue-600 hover:bg-blue-50 font-semibold text-xs transition-all">
+                <button onclick="savePostTemplate()" class="flex items-center gap-2 px-5 py-2.5 rounded-xl border border-indigo-600 text-indigo-600 hover:bg-indigo-50 font-bold text-xs transition-all active:scale-95">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>
                   <span>Save as Post Template</span>
                 </button>
               </div>
+
             </div>
 
             <!-- RIGHT: DISPATCH & ACCOUNT ROTATION CONFIG (5 COLS) -->
             <div class="lg:col-span-5 space-y-6">
 
               <!-- Target Audience Box -->
-              <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                <h3 class="font-display font-bold text-slate-900 flex items-center gap-2">
+              <div class="bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-4">
+                <h3 class="font-display font-bold text-slate-900 text-base flex items-center gap-2">
                   <span>🎯 Target Audience Selection</span>
                 </h3>
 
                 <div class="space-y-2.5">
-                  <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 cursor-pointer transition-all">
-                    <input type="radio" name="sending-target" value="all_userbots" checked onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                  <label class="flex items-center gap-3.5 p-3.5 rounded-2xl border border-slate-200/80 hover:border-indigo-400 bg-slate-50/60 cursor-pointer transition-all">
+                    <input type="radio" name="sending-target" value="all_userbots" checked onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
                     <div class="flex-1">
-                      <div class="text-sm font-semibold text-slate-800">All Userbots</div>
-                      <div class="text-xs text-slate-500">Sends to all automated deal bots (<span id="target-count-userbots">0</span> ready)</div>
+                      <div class="text-sm font-bold text-slate-800">All Userbots</div>
+                      <div class="text-xs text-slate-500 font-medium">Sends to all automated deal bots (<span id="target-count-userbots" class="font-bold text-indigo-600">0</span> ready)</div>
                     </div>
                   </label>
 
-                  <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 cursor-pointer transition-all">
-                    <input type="radio" name="sending-target" value="all_usernames" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                  <label class="flex items-center gap-3.5 p-3.5 rounded-2xl border border-slate-200/80 hover:border-indigo-400 bg-slate-50/60 cursor-pointer transition-all">
+                    <input type="radio" name="sending-target" value="all_usernames" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
                     <div class="flex-1">
-                      <div class="text-sm font-semibold text-slate-800">All Usernames</div>
-                      <div class="text-xs text-slate-500">Sends to human channel owners (<span id="target-count-usernames">0</span> ready)</div>
+                      <div class="text-sm font-bold text-slate-800">All Usernames</div>
+                      <div class="text-xs text-slate-500 font-medium">Sends to channel owners (<span id="target-count-usernames" class="font-bold text-purple-600">0</span> ready)</div>
                     </div>
                   </label>
 
-                  <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 cursor-pointer transition-all">
-                    <input type="radio" name="sending-target" value="uncontacted" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                  <label class="flex items-center gap-3.5 p-3.5 rounded-2xl border border-slate-200/80 hover:border-indigo-400 bg-slate-50/60 cursor-pointer transition-all">
+                    <input type="radio" name="sending-target" value="uncontacted" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
                     <div class="flex-1">
-                      <div class="text-sm font-semibold text-slate-800">Uncontacted Leads Only</div>
-                      <div class="text-xs text-slate-500">Avoids leads already contacted (<span id="target-count-uncontacted">0</span> ready)</div>
+                      <div class="text-sm font-bold text-slate-800">Uncontacted Leads Only</div>
+                      <div class="text-xs text-slate-500 font-medium">Avoids leads already contacted (<span id="target-count-uncontacted" class="font-bold text-emerald-600">0</span> ready)</div>
                     </div>
                   </label>
 
-                  <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 cursor-pointer transition-all">
-                    <input type="radio" name="sending-target" value="custom" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                  <label class="flex items-center gap-3.5 p-3.5 rounded-2xl border border-slate-200/80 hover:border-indigo-400 bg-slate-50/60 cursor-pointer transition-all">
+                    <input type="radio" name="sending-target" value="custom" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
                     <div class="flex-1">
-                      <div class="text-sm font-semibold text-slate-800">Custom Handles List</div>
-                      <div class="text-xs text-slate-500">Paste specific handles to target</div>
+                      <div class="text-sm font-bold text-slate-800">Custom Handles List</div>
+                      <div class="text-xs text-slate-500 font-medium">Paste custom handles to target directly</div>
                     </div>
                   </label>
                 </div>
 
                 <!-- Custom Handles Input (Hidden by default) -->
-                <div id="custom-handles-box" class="hidden pt-2">
+                <div id="custom-handles-box" class="hidden pt-1">
                   <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Enter Handles (separated by commas or lines)</label>
-                  <textarea id="custom-handles-text" rows="3" placeholder="@deal_robot, @owner1, @shopping_bot" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs"></textarea>
+                  <textarea id="custom-handles-text" rows="3" placeholder="@deal_robot, @owner1, @shopping_bot" class="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono"></textarea>
                 </div>
               </div>
 
               <!-- Account Rotation & Safety Settings -->
-              <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                <h3 class="font-display font-bold text-slate-900 flex items-center justify-between">
-                  <span>🔄 Account Rotation Setup</span>
-                  <span id="rotation-active-count-badge" class="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">0 Accounts Ready</span>
-                </h3>
+              <div class="bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-5">
+                <div class="flex items-center justify-between">
+                  <h3 class="font-display font-bold text-slate-900 text-base">🔄 Account Rotation Pool</h3>
+                  <span id="rotation-active-count-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200/60">0 Accounts Ready</span>
+                </div>
 
                 <!-- Active Accounts In Rotation Pill List -->
-                <div id="rotation-accounts-list" class="flex flex-wrap gap-1.5 p-3 rounded-xl bg-slate-50 border border-slate-200 min-h-[44px]">
+                <div id="rotation-accounts-list" class="flex flex-wrap gap-2 p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 min-h-[48px]">
                   <span class="text-xs text-slate-400 italic">No sending accounts detected.</span>
                 </div>
 
                 <!-- Delay Slider -->
-                <div class="space-y-1.5">
+                <div class="space-y-2">
                   <div class="flex justify-between text-xs">
-                    <span class="font-semibold text-slate-700">Delay Between Dispatches</span>
-                    <span id="sending-delay-value" class="font-bold text-blue-600">15s Safe Delay</span>
+                    <span class="font-bold text-slate-700">Pacing Delay</span>
+                    <span id="sending-delay-value" class="font-extrabold text-indigo-600">15s Safe Delay</span>
                   </div>
-                  <input id="sending-delay-slider" oninput="document.getElementById('sending-delay-value').innerText = this.value + 's Safe Delay'" type="range" min="5" max="60" value="15" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600">
-                  <div class="flex justify-between text-[10px] text-slate-400">
+                  <input id="sending-delay-slider" oninput="document.getElementById('sending-delay-value').innerText = this.value + 's Safe Delay'" type="range" min="5" max="60" value="15" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600">
+                  <div class="flex justify-between text-[10px] text-slate-400 font-semibold">
                     <span>5s (Aggressive)</span>
-                    <span>15s (Recommended)</span>
+                    <span class="text-indigo-600">15s (Recommended)</span>
                     <span>60s (Ultra-Safe)</span>
                   </div>
                 </div>
@@ -994,15 +1075,15 @@ def generate_frontend_html():
                 <!-- Max per account -->
                 <div class="flex items-center justify-between pt-1">
                   <div>
-                    <div class="text-xs font-semibold text-slate-700">Max Sends per Account</div>
+                    <div class="text-xs font-bold text-slate-700">Max Sends per Account</div>
                     <div class="text-[11px] text-slate-400">Rotates to next account after N sends</div>
                   </div>
-                  <input id="sending-max-per-account" type="number" value="25" min="1" max="100" class="w-20 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold text-center">
+                  <input id="sending-max-per-account" type="number" value="25" min="1" max="100" class="w-20 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-center">
                 </div>
 
                 <!-- Dispatch Button -->
                 <div class="pt-2">
-                  <button id="btn-start-sending" onclick="startManualSending()" class="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-display font-bold text-base shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2">
+                  <button id="btn-start-sending" onclick="startManualSending()" class="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-indigo-600 via-indigo-700 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-display font-extrabold text-base shadow-lg shadow-indigo-500/25 transition-all flex items-center justify-center gap-2.5 active:scale-98">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
                     <span>Start Manual Sending Campaign</span>
                   </button>
@@ -1012,19 +1093,19 @@ def generate_frontend_html():
             </div>
           </div>
 
-          <!-- LIVE CAMPAIGN DISPATCH MONITOR (ACTIVE PROGRESS) -->
-          <div id="campaign-monitor-card" class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+          <!-- LIVE CAMPAIGN DISPATCH MONITOR -->
+          <div id="campaign-monitor-card" class="bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-5">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
               <div class="flex items-center gap-3">
                 <span id="monitor-status-pill" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600">
                   <span class="w-2 h-2 rounded-full bg-slate-400"></span>
                   <span>Idle</span>
                 </span>
-                <span id="monitor-campaign-title" class="text-sm font-bold text-slate-900">Campaign Monitor</span>
+                <span id="monitor-campaign-title" class="text-sm font-bold text-slate-900">Campaign Dispatch Monitor</span>
               </div>
 
-              <div class="flex items-center gap-2">
-                <button id="btn-stop-campaign" onclick="stopCampaign()" class="hidden px-4 py-1.5 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 font-semibold text-xs transition-all flex items-center gap-1.5">
+              <div>
+                <button id="btn-stop-campaign" onclick="stopCampaign()" class="hidden px-4 py-1.5 rounded-xl bg-red-50 text-red-600 hover:bg-red-100 font-bold text-xs transition-all flex items-center gap-1.5">
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                   <span>Stop Campaign</span>
                 </button>
@@ -1033,97 +1114,101 @@ def generate_frontend_html():
 
             <!-- Progress Bar -->
             <div class="space-y-1.5">
-              <div class="flex justify-between text-xs font-semibold">
+              <div class="flex justify-between text-xs font-bold">
                 <span id="monitor-progress-text" class="text-slate-600">0 of 0 Completed</span>
-                <span id="monitor-progress-percent" class="text-blue-600 font-bold">0%</span>
+                <span id="monitor-progress-percent" class="text-indigo-600 font-extrabold">0%</span>
               </div>
-              <div class="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
-                <div id="monitor-progress-bar" class="h-full bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full transition-all duration-300" style="width: 0%"></div>
+              <div class="w-full h-3.5 bg-slate-100 rounded-full overflow-hidden">
+                <div id="monitor-progress-bar" class="h-full bg-gradient-to-r from-indigo-500 to-blue-600 rounded-full transition-all duration-300" style="width: 0%"></div>
               </div>
             </div>
 
             <!-- 4 Metrics Chips -->
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
-              <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                <div class="text-[11px] font-semibold text-slate-400 uppercase">Total Targets</div>
-                <div id="monitor-stat-total" class="text-xl font-bold text-slate-900 mt-0.5">0</div>
+              <div class="p-3.5 bg-slate-50 rounded-2xl border border-slate-100">
+                <div class="text-[10px] font-bold text-slate-400 uppercase">Total Targets</div>
+                <div id="monitor-stat-total" class="text-2xl font-extrabold text-slate-900 mt-0.5">0</div>
               </div>
-              <div class="p-3 bg-emerald-50 rounded-xl border border-emerald-100">
-                <div class="text-[11px] font-semibold text-emerald-600 uppercase">Successfully Sent</div>
-                <div id="monitor-stat-sent" class="text-xl font-bold text-emerald-700 mt-0.5">0</div>
+              <div class="p-3.5 bg-emerald-50 rounded-2xl border border-emerald-100">
+                <div class="text-[10px] font-bold text-emerald-600 uppercase">Successfully Sent</div>
+                <div id="monitor-stat-sent" class="text-2xl font-extrabold text-emerald-700 mt-0.5">0</div>
               </div>
-              <div class="p-3 bg-red-50 rounded-xl border border-red-100">
-                <div class="text-[11px] font-semibold text-red-600 uppercase">Failed / Skipped</div>
-                <div id="monitor-stat-failed" class="text-xl font-bold text-red-700 mt-0.5">0</div>
+              <div class="p-3.5 bg-red-50 rounded-2xl border border-red-100">
+                <div class="text-[10px] font-bold text-red-600 uppercase">Failed / Skipped</div>
+                <div id="monitor-stat-failed" class="text-2xl font-extrabold text-red-700 mt-0.5">0</div>
               </div>
-              <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                <div class="text-[11px] font-semibold text-slate-400 uppercase">Remaining</div>
-                <div id="monitor-stat-remaining" class="text-xl font-bold text-slate-700 mt-0.5">0</div>
+              <div class="p-3.5 bg-slate-50 rounded-2xl border border-slate-100">
+                <div class="text-[10px] font-bold text-slate-400 uppercase">Remaining</div>
+                <div id="monitor-stat-remaining" class="text-2xl font-extrabold text-slate-700 mt-0.5">0</div>
               </div>
             </div>
 
             <!-- Current Active Rotation Info -->
-            <div class="flex flex-wrap items-center justify-between text-xs px-4 py-2.5 rounded-xl bg-slate-50 text-slate-600 border border-slate-200">
+            <div class="flex flex-wrap items-center justify-between text-xs px-5 py-3 rounded-2xl bg-slate-50 text-slate-600 border border-slate-200/80">
               <div class="flex items-center gap-2">
                 <span class="font-bold text-slate-800">Active Account:</span>
-                <span id="monitor-active-account" class="font-mono text-blue-600 font-semibold">None</span>
+                <span id="monitor-active-account" class="font-mono text-indigo-600 font-bold">None</span>
               </div>
               <div class="flex items-center gap-2">
                 <span class="font-bold text-slate-800">Target Lead:</span>
-                <span id="monitor-active-lead" class="font-mono text-purple-600 font-semibold">None</span>
+                <span id="monitor-active-lead" class="font-mono text-purple-600 font-bold">None</span>
               </div>
             </div>
 
             <!-- Live Dispatch Console Output -->
-            <div class="space-y-1">
-              <div class="text-xs font-bold text-slate-500 uppercase tracking-wider">Live Dispatch Stream</div>
-              <div id="monitor-log-terminal" class="bg-slate-900 text-slate-200 p-4 rounded-xl font-mono text-xs h-48 overflow-y-auto space-y-1.5 border border-slate-800">
+            <div class="space-y-1.5">
+              <div class="text-xs font-bold text-slate-500 uppercase tracking-wider">Live Dispatch Terminal</div>
+              <div id="monitor-log-terminal" class="bg-slate-950 text-slate-200 p-5 rounded-2xl font-mono text-xs h-52 overflow-y-auto space-y-1.5 border border-slate-800 shadow-inner">
                 <div class="text-slate-500 italic">[Waiting for dispatch campaign initiation...]</div>
               </div>
             </div>
           </div>
+
         </section>
 
 
-        <!-- ========================================== -->
-        <!-- SECTION 3: LOGIN ACCOUNTS TAB              -->
-        <!-- ========================================== -->
-        <section id="tab-accounts" class="tab-content hidden space-y-6">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
+        <!-- ======================================================== -->
+        <!-- SECTION 3: LOGIN ACCOUNTS MANAGEMENT                    -->
+        <!-- ======================================================== -->
+        <section id="tab-accounts" class="tab-content hidden space-y-7">
+          
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2">
             <div>
-              <h2 class="text-2xl font-display font-bold text-slate-900">Login Accounts Management</h2>
-              <p class="text-sm text-slate-500 mt-0.5">Manage and authenticate the Telegram MTProto accounts used for distributing promotional messages via account rotation.</p>
+              <h2 class="text-2xl font-display font-extrabold text-slate-900 tracking-tight">Login Accounts Management</h2>
+              <p class="text-sm text-slate-500 mt-1">Connect and monitor Telegram MTProto accounts used for distributing promotional messages via account rotation.</p>
             </div>
 
-            <div class="flex items-center gap-3">
-              <button onclick="openConnectAccountModal()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm transition-all">
+            <div>
+              <button onclick="openConnectAccountModal()" class="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm shadow-indigo-500/25 transition-all active:scale-95">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                 <span>Connect Telegram Account</span>
               </button>
             </div>
           </div>
 
-          <!-- Accounts Grid -->
-          <div id="accounts-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-            <div class="col-span-full py-12 text-center text-slate-400 bg-white rounded-2xl border border-slate-200">
+          <!-- Accounts Cards Grid -->
+          <div id="accounts-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div class="col-span-full py-16 text-center text-slate-400 bg-white rounded-3xl border border-slate-200/80">
               Loading registered accounts...
             </div>
           </div>
+
         </section>
 
 
-        <!-- ========================================== -->
-        <!-- SECTION 4: AUTOMATIC SENDING REPORT TAB    -->
-        <!-- ========================================== -->
-        <section id="tab-reports" class="tab-content hidden space-y-6">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
+        <!-- ======================================================== -->
+        <!-- SECTION 4: AUTOMATIC SENDING REPORT                     -->
+        <!-- ======================================================== -->
+        <section id="tab-reports" class="tab-content hidden space-y-7">
+          
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2">
             <div>
-              <h2 class="text-2xl font-display font-bold text-slate-900">Automatic Sending Reports</h2>
-              <p class="text-sm text-slate-500 mt-0.5">Comprehensive audit logs and performance statistics across all sending accounts and dispatched campaigns.</p>
+              <h2 class="text-2xl font-display font-extrabold text-slate-900 tracking-tight">Automatic Sending Reports</h2>
+              <p class="text-sm text-slate-500 mt-1">Comprehensive audit logs and performance statistics across all sending accounts and dispatched campaigns.</p>
             </div>
 
-            <div class="flex items-center gap-3">
-              <button onclick="exportReportsCsv()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-all">
+            <div>
+              <button onclick="exportReportsCsv()" class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-all active:scale-95">
                 <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
                 <span>Export Audit CSV</span>
               </button>
@@ -1131,114 +1216,119 @@ def generate_frontend_html():
           </div>
 
           <!-- 4 Summary KPI Cards -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Messages Sent</div>
-              <div id="report-stat-total" class="text-3xl font-display font-extrabold text-slate-900 mt-1">0</div>
-              <div class="text-[11px] text-slate-400 mt-0.5">All-time promotional deliveries</div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card">
+              <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Total Messages Sent</div>
+              <div id="report-stat-total" class="text-3xl font-display font-extrabold text-slate-900 mt-1.5">0</div>
+              <div class="text-[11px] text-slate-400 mt-1">All-time promotional deliveries</div>
             </div>
 
-            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Sent Today</div>
-              <div id="report-stat-today" class="text-3xl font-display font-extrabold text-blue-600 mt-1">0</div>
-              <div class="text-[11px] text-slate-400 mt-0.5">Messages dispatched today</div>
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card">
+              <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Sent Today</div>
+              <div id="report-stat-today" class="text-3xl font-display font-extrabold text-indigo-600 mt-1.5">0</div>
+              <div class="text-[11px] text-slate-400 mt-1">Messages dispatched today</div>
             </div>
 
-            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Delivery Success Rate</div>
-              <div id="report-stat-success-rate" class="text-3xl font-display font-extrabold text-emerald-600 mt-1">100%</div>
-              <div class="text-[11px] text-slate-400 mt-0.5">Successful MTProto dispatches</div>
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card">
+              <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Success Rate</div>
+              <div id="report-stat-success-rate" class="text-3xl font-display font-extrabold text-emerald-600 mt-1.5">100%</div>
+              <div class="text-[11px] text-slate-400 mt-1">Successful deliveries ratio</div>
             </div>
 
-            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Active Senders</div>
-              <div id="report-stat-accounts" class="text-3xl font-display font-extrabold text-purple-600 mt-1">0</div>
-              <div class="text-[11px] text-slate-400 mt-0.5">Telegram accounts in rotation</div>
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card">
+              <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Active Senders</div>
+              <div id="report-stat-accounts" class="text-3xl font-display font-extrabold text-purple-600 mt-1.5">0</div>
+              <div class="text-[11px] text-slate-400 mt-1">Telegram accounts rotating</div>
             </div>
+
           </div>
 
           <!-- Analytics Breakdown: By Account & By Lead Type -->
-          <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-7">
+            
             <!-- Left: Breakdown by Sending Account -->
-            <div class="lg:col-span-7 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+            <div class="lg:col-span-7 bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-4">
               <h3 class="font-display font-bold text-slate-900 text-sm">📊 Deliveries by Sender Account</h3>
               <div class="overflow-x-auto">
                 <table class="w-full text-left text-xs">
-                  <thead class="bg-slate-50 text-slate-500 uppercase font-semibold">
+                  <thead class="bg-slate-50 text-slate-500 uppercase font-bold">
                     <tr>
-                      <th class="py-2.5 px-3">Sender Phone</th>
-                      <th class="py-2.5 px-3">Account Name</th>
-                      <th class="py-2.5 px-3 text-right">Messages Sent</th>
+                      <th class="py-3 px-3.5">Sender Phone</th>
+                      <th class="py-3 px-3.5">Account Role</th>
+                      <th class="py-3 px-3.5 text-right">Messages Sent</th>
                     </tr>
                   </thead>
-                  <tbody id="reports-by-account-tbody" class="divide-y divide-slate-100">
-                    <tr><td colspan="3" class="py-4 text-center text-slate-400">No dispatch data yet.</td></tr>
+                  <tbody id="reports-by-account-tbody" class="divide-y divide-slate-100 font-medium">
+                    <tr><td colspan="3" class="py-5 text-center text-slate-400">No dispatch data recorded yet.</td></tr>
                   </tbody>
                 </table>
               </div>
             </div>
 
             <!-- Right: Breakdown by Lead Type -->
-            <div class="lg:col-span-5 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+            <div class="lg:col-span-5 bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-4">
               <h3 class="font-display font-bold text-slate-900 text-sm">🎯 Target Segmentation Breakdown</h3>
-              <div id="reports-type-breakdown-box" class="space-y-4 py-2">
+              <div id="reports-type-breakdown-box" class="space-y-5 py-2">
                 <div>
-                  <div class="flex justify-between text-xs font-semibold mb-1">
+                  <div class="flex justify-between text-xs font-bold mb-1.5">
                     <span class="text-slate-700">🤖 Userbots</span>
-                    <span id="breakdown-userbots-count" class="text-blue-600">0 (0%)</span>
+                    <span id="breakdown-userbots-count" class="text-indigo-600 font-extrabold">0 (0%)</span>
                   </div>
-                  <div class="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                    <div id="breakdown-userbots-bar" class="h-full bg-blue-500 rounded-full" style="width: 0%"></div>
+                  <div class="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
+                    <div id="breakdown-userbots-bar" class="h-full bg-indigo-500 rounded-full transition-all duration-500" style="width: 0%"></div>
                   </div>
                 </div>
 
                 <div>
-                  <div class="flex justify-between text-xs font-semibold mb-1">
+                  <div class="flex justify-between text-xs font-bold mb-1.5">
                     <span class="text-slate-700">👤 Usernames</span>
-                    <span id="breakdown-usernames-count" class="text-purple-600">0 (0%)</span>
+                    <span id="breakdown-usernames-count" class="text-purple-600 font-extrabold">0 (0%)</span>
                   </div>
-                  <div class="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                    <div id="breakdown-usernames-bar" class="h-full bg-purple-500 rounded-full" style="width: 0%"></div>
+                  <div class="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
+                    <div id="breakdown-usernames-bar" class="h-full bg-purple-500 rounded-full transition-all duration-500" style="width: 0%"></div>
                   </div>
                 </div>
               </div>
             </div>
+
           </div>
 
           <!-- Comprehensive Delivery Audit Log Table -->
-          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <div class="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div class="font-display font-bold text-slate-900 text-sm">Delivery Audit Logs</div>
-              <div class="flex items-center gap-2">
-                <select id="reports-status-filter" onchange="loadReports()" class="text-xs py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-lg text-slate-700 font-medium">
+          <div class="bg-white rounded-3xl border border-slate-200/80 shadow-card overflow-hidden">
+            <div class="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div class="font-display font-extrabold text-slate-900 text-base">Delivery Audit Logs</div>
+              <div>
+                <select id="reports-status-filter" onchange="loadReports()" class="text-xs py-2 px-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-700 font-semibold">
                   <option value="">All Statuses</option>
-                  <option value="sent">Sent Only</option>
-                  <option value="failed">Failed Only</option>
+                  <option value="sent">✅ Sent Only</option>
+                  <option value="failed">❌ Failed Only</option>
                 </select>
               </div>
             </div>
 
             <div class="overflow-x-auto">
               <table class="w-full text-left text-sm">
-                <thead class="bg-slate-50/75 border-b border-slate-200 text-slate-500 uppercase text-[11px] font-semibold tracking-wider">
+                <thead class="bg-slate-50/80 border-b border-slate-200/80 text-slate-500 uppercase text-[11px] font-bold tracking-wider">
                   <tr>
-                    <th class="py-3.5 px-6">Timestamp</th>
-                    <th class="py-3.5 px-4">Recipient Handle</th>
-                    <th class="py-3.5 px-4">Type</th>
-                    <th class="py-3.5 px-4">Sender Phone</th>
-                    <th class="py-3.5 px-4">Post Title</th>
-                    <th class="py-3.5 px-4">Status</th>
-                    <th class="py-3.5 px-6">Details / Note</th>
+                    <th class="py-4 px-6">Timestamp</th>
+                    <th class="py-4 px-4">Recipient Handle</th>
+                    <th class="py-4 px-4">Type</th>
+                    <th class="py-4 px-4">Sender Phone</th>
+                    <th class="py-4 px-4">Post Title</th>
+                    <th class="py-4 px-4">Status</th>
+                    <th class="py-4 px-6">Details / Note</th>
                   </tr>
                 </thead>
-                <tbody id="reports-table-body" class="divide-y divide-slate-100">
+                <tbody id="reports-table-body" class="divide-y divide-slate-100 font-medium">
                   <tr>
-                    <td colspan="7" class="py-12 text-center text-slate-400">Loading delivery history...</td>
+                    <td colspan="7" class="py-16 text-center text-slate-400">Loading delivery history...</td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
+
         </section>
 
       </div>
@@ -1246,75 +1336,75 @@ def generate_frontend_html():
   </div>
 
   <!-- MODAL: ADD LEAD -->
-  <div id="modal-add-lead" class="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm hidden flex items-center justify-center p-4">
-    <div class="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-2xl p-6 space-y-4">
+  <div id="modal-add-lead" class="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-white w-full max-w-md rounded-3xl border border-slate-200 shadow-2xl p-7 space-y-5">
       <div class="flex items-center justify-between pb-3 border-b border-slate-100">
-        <h3 class="font-display font-bold text-lg text-slate-900">Add New Lead</h3>
-        <button onclick="closeAddLeadModal()" class="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
+        <h3 class="font-display font-extrabold text-lg text-slate-900">Add New Lead</h3>
+        <button onclick="closeAddLeadModal()" class="text-slate-400 hover:text-slate-600 text-2xl font-bold">&times;</button>
       </div>
 
-      <div class="space-y-3">
+      <div class="space-y-4">
         <div>
-          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Telegram Username / Handle</label>
-          <input id="modal-lead-username" type="text" placeholder="e.g. @loot_deal_bot or admin_handle" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Telegram Handle / Username</label>
+          <input id="modal-lead-username" type="text" placeholder="e.g. @loot_deal_bot or owner_name" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Lead Type</label>
-          <select id="modal-lead-type" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Classification</label>
+          <select id="modal-lead-type" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500">
             <option value="bot">🤖 Userbot (Deal Bot)</option>
             <option value="user">👤 Username (Human Channel Owner)</option>
           </select>
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Discovered Source / Note (Optional)</label>
-          <input id="modal-lead-source" type="text" placeholder="e.g. Amazon Deals Channel" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Discovered Source / Note (Optional)</label>
+          <input id="modal-lead-source" type="text" placeholder="e.g. Amazon Deals Telegram Channel" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
         </div>
       </div>
 
       <div class="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
-        <button onclick="closeAddLeadModal()" class="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 font-semibold text-sm">Cancel</button>
-        <button onclick="submitAddLead()" class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm shadow-sm">Save Lead</button>
+        <button onclick="closeAddLeadModal()" class="px-5 py-2.5 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 font-bold text-xs">Cancel</button>
+        <button onclick="submitAddLead()" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm shadow-indigo-500/25">Save Lead</button>
       </div>
     </div>
   </div>
 
   <!-- MODAL: CONNECT TELEGRAM ACCOUNT -->
-  <div id="modal-connect-account" class="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm hidden flex items-center justify-center p-4">
-    <div class="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-2xl p-6 space-y-4">
+  <div id="modal-connect-account" class="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-white w-full max-w-md rounded-3xl border border-slate-200 shadow-2xl p-7 space-y-5">
       <div class="flex items-center justify-between pb-3 border-b border-slate-100">
-        <h3 class="font-display font-bold text-lg text-slate-900">Connect Telegram Account</h3>
-        <button onclick="closeConnectAccountModal()" class="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
+        <h3 class="font-display font-extrabold text-lg text-slate-900">Connect Telegram Account</h3>
+        <button onclick="closeConnectAccountModal()" class="text-slate-400 hover:text-slate-600 text-2xl font-bold">&times;</button>
       </div>
 
       <!-- Step 1: Phone -->
-      <div id="account-step-1" class="space-y-3">
-        <p class="text-xs text-slate-500">Enter the international phone number associated with your Telegram account (e.g. +919876543210).</p>
+      <div id="account-step-1" class="space-y-4">
+        <p class="text-xs text-slate-500 leading-relaxed font-medium">Enter your international phone number associated with your Telegram account (e.g. +919876543210).</p>
         <div>
-          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Phone Number</label>
-          <input id="modal-account-phone" type="text" placeholder="+919876543210" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Phone Number</label>
+          <input id="modal-account-phone" type="text" placeholder="+919876543210" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500">
         </div>
         <div class="pt-2">
-          <button id="btn-modal-send-code" onclick="submitStartAccountLogin()" class="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm shadow-sm flex items-center justify-center gap-2">
+          <button id="btn-modal-send-code" onclick="submitStartAccountLogin()" class="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm shadow-sm shadow-indigo-500/25 flex items-center justify-center gap-2">
             <span>Send Telegram OTP Code</span>
           </button>
         </div>
       </div>
 
       <!-- Step 2: OTP & 2FA -->
-      <div id="account-step-2" class="space-y-3 hidden">
-        <p class="text-xs text-slate-500">Enter the verification code sent to your Telegram app for <span id="modal-display-phone" class="font-bold text-slate-800"></span>.</p>
+      <div id="account-step-2" class="space-y-4 hidden">
+        <p class="text-xs text-slate-500 leading-relaxed font-medium">Enter the 5-digit verification code sent to your Telegram app for <span id="modal-display-phone" class="font-bold text-slate-900"></span>.</p>
         <div>
-          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Verification Code</label>
-          <input id="modal-account-code" type="text" placeholder="12345" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Verification Code</label>
+          <input id="modal-account-code" type="text" placeholder="12345" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-base font-mono font-extrabold tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-indigo-500">
         </div>
         <div>
-          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">2FA Cloud Password (Optional)</label>
-          <input id="modal-account-password" type="password" placeholder="Leave blank if not set" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">2FA Cloud Password (Optional)</label>
+          <input id="modal-account-password" type="password" placeholder="Leave blank if not set" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
         </div>
         <div class="pt-2">
-          <button id="btn-modal-complete-login" onclick="submitCompleteAccountLogin()" class="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm shadow-sm flex items-center justify-center gap-2">
+          <button id="btn-modal-complete-login" onclick="submitCompleteAccountLogin()" class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-sm shadow-emerald-500/25 flex items-center justify-center gap-2">
             <span>Authorize & Connect Account</span>
           </button>
         </div>
@@ -1340,12 +1430,12 @@ def generate_frontend_html():
       const container = document.getElementById('toast-container');
       const toast = document.createElement('div');
       const colors = {
-        success: 'bg-emerald-600 text-white',
-        error: 'bg-red-600 text-white',
-        info: 'bg-slate-900 text-white',
-        warning: 'bg-amber-600 text-white'
+        success: 'bg-emerald-600 text-white shadow-emerald-600/30',
+        error: 'bg-red-600 text-white shadow-red-600/30',
+        info: 'bg-slate-900 text-white shadow-slate-900/30',
+        warning: 'bg-amber-600 text-white shadow-amber-600/30'
       };
-      toast.className = `px-4 py-3 rounded-xl shadow-xl text-sm font-semibold pointer-events-auto transform transition-all duration-300 translate-y-2 opacity-0 flex items-center gap-2 ${colors[type] || colors.info}`;
+      toast.className = `px-5 py-3.5 rounded-2xl shadow-xl text-xs font-bold pointer-events-auto transform transition-all duration-300 translate-y-2 opacity-0 flex items-center gap-2.5 ${colors[type] || colors.info}`;
       toast.innerHTML = `<span>${message}</span>`;
       container.appendChild(toast);
       setTimeout(() => { toast.classList.remove('translate-y-2', 'opacity-0'); }, 10);
@@ -1353,6 +1443,25 @@ def generate_frontend_html():
         toast.classList.add('opacity-0', 'translate-y-2');
         setTimeout(() => toast.remove(), 300);
       }, 4000);
+    }
+
+    // Robust Source Formatter (Never crashes on object, array, or string)
+    function formatLeadSource(src) {
+      if (!src) return 'Direct';
+      if (typeof src === 'string') return src;
+      if (Array.isArray(src)) {
+        const names = src.map(s => {
+          if (typeof s === 'object' && s) {
+            return s.channel_name || s.source_name || s.name || '';
+          }
+          return String(s || '');
+        }).filter(Boolean);
+        return names.join(', ') || 'Direct';
+      }
+      if (typeof src === 'object') {
+        return src.channel_name || src.source_name || src.name || 'Direct';
+      }
+      return String(src);
     }
 
     // Switch Top-level Tabs
@@ -1373,12 +1482,12 @@ def generate_frontend_html():
       }
 
       const titles = {
-        'tab-leads': 'Leads',
+        'tab-leads': 'Leads Directory',
         'tab-sending': 'Manual Sending',
         'tab-accounts': 'Login Accounts',
         'tab-reports': 'Sending Reports'
       };
-      document.getElementById('header-breadcrumb').innerText = `ProAffiliaters / ${titles[tabId] || 'Dashboard'}`;
+      document.getElementById('header-breadcrumb').innerHTML = `ProAffiliaters <span class="text-slate-300">/</span> <span class="text-indigo-600">${titles[tabId] || 'Dashboard'}</span>`;
 
       if (tabId === 'tab-leads') loadLeads();
       if (tabId === 'tab-sending') { loadSendingData(); checkCampaignStatus(); }
@@ -1402,11 +1511,15 @@ def generate_frontend_html():
       const userBtn = document.getElementById('subtab-btn-usernames');
 
       if (type === 'bot') {
-        botBtn.className = 'px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white shadow-sm transition-all flex items-center gap-2';
-        userBtn.className = 'px-4 py-2 text-sm font-medium rounded-lg text-slate-600 hover:bg-slate-200 transition-all flex items-center gap-2';
+        botBtn.className = 'px-5 py-2.5 text-xs font-bold rounded-xl bg-indigo-600 text-white shadow-sm flex items-center gap-2.5 transition-all';
+        botBtn.querySelector('span:last-child').className = 'px-2 py-0.5 rounded-full bg-white/25 text-white text-[11px] font-extrabold';
+        userBtn.className = 'px-5 py-2.5 text-xs font-semibold rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 flex items-center gap-2.5 transition-all';
+        userBtn.querySelector('span:last-child').className = 'px-2 py-0.5 rounded-full bg-slate-300 text-slate-700 text-[11px] font-extrabold';
       } else {
-        userBtn.className = 'px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white shadow-sm transition-all flex items-center gap-2';
-        botBtn.className = 'px-4 py-2 text-sm font-medium rounded-lg text-slate-600 hover:bg-slate-200 transition-all flex items-center gap-2';
+        userBtn.className = 'px-5 py-2.5 text-xs font-bold rounded-xl bg-indigo-600 text-white shadow-sm flex items-center gap-2.5 transition-all';
+        userBtn.querySelector('span:last-child').className = 'px-2 py-0.5 rounded-full bg-white/25 text-white text-[11px] font-extrabold';
+        botBtn.className = 'px-5 py-2.5 text-xs font-semibold rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 flex items-center gap-2.5 transition-all';
+        botBtn.querySelector('span:last-child').className = 'px-2 py-0.5 rounded-full bg-slate-300 text-slate-700 text-[11px] font-extrabold';
       }
       loadLeads();
     }
@@ -1427,53 +1540,57 @@ def generate_frontend_html():
         leadsData = data.leads || [];
 
         if (leadsData.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="6" class="py-12 text-center text-slate-400">No ${currentLeadType === 'bot' ? 'userbots' : 'usernames'} found matching your criteria.</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="6" class="py-16 text-center text-slate-400 font-medium">No ${currentLeadType === 'bot' ? 'userbots' : 'usernames'} found matching your filters.</td></tr>`;
           document.getElementById('leads-pagination-info').innerText = 'Showing 0 leads';
           return;
         }
 
         tbody.innerHTML = leadsData.map(l => {
-          const handle = l.username ? (l.username.startsWith('@') ? l.username : '@' + l.username) : '@unknown';
-          const clean = handle.replace('@', '');
+          let rawUser = String(l.username || l.username_clean || 'unknown').trim();
+          if (!rawUser.startsWith('@')) rawUser = '@' + rawUser;
+          const clean = rawUser.replace(/^@/, '');
+
           const isBot = l.lead_type === 'bot' || clean.toLowerCase().endsWith('bot');
           const typeBadge = isBot
-            ? `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">🤖 Userbot</span>`
-            : `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">👤 Username</span>`;
+            ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60">🤖 Userbot</span>`
+            : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-purple-50 text-purple-700 border border-purple-200/60">👤 Username</span>`;
 
-          const sources = (l.extracted_from || []).map(s => s.channel_name).filter(Boolean).join(', ') || 'Direct';
-          const firstSeen = l.first_seen_at ? l.first_seen_at.substring(0, 10) : 'Recent';
+          const sources = formatLeadSource(l.extracted_from);
+          const firstSeen = l.first_seen_at ? String(l.first_seen_at).substring(0, 10) : 'Recent';
 
           const statusColors = {
-            pending: 'bg-amber-50 text-amber-700 border-amber-200',
-            contacted: 'bg-blue-50 text-blue-700 border-blue-200',
-            replied: 'bg-indigo-50 text-indigo-700 border-indigo-200',
-            converted: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-            ignored: 'bg-slate-100 text-slate-500 border-slate-200'
+            pending: 'bg-amber-50 text-amber-700 border-amber-200/80',
+            contacted: 'bg-blue-50 text-blue-700 border-blue-200/80',
+            replied: 'bg-indigo-50 text-indigo-700 border-indigo-200/80',
+            converted: 'bg-emerald-50 text-emerald-700 border-emerald-200/80',
+            ignored: 'bg-slate-100 text-slate-600 border-slate-200'
           };
-          const currentStatus = l.status || 'pending';
+          const currentStatus = String(l.status || 'pending').toLowerCase();
 
           return `
-            <tr class="hover:bg-slate-50/75 transition-all">
-              <td class="py-3 px-6 font-semibold text-slate-900">
-                <a href="https://t.me/${clean}" target="_blank" class="hover:text-blue-600 hover:underline flex items-center gap-1.5">
-                  <span>${handle}</span>
-                  <svg class="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+            <tr class="hover:bg-slate-50/80 transition-all">
+              <td class="py-3.5 px-6 font-bold text-slate-900">
+                <a href="https://t.me/${clean}" target="_blank" class="hover:text-indigo-600 hover:underline flex items-center gap-2">
+                  <span class="w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                    <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .37z"/></svg>
+                  </span>
+                  <span>${rawUser}</span>
                 </a>
               </td>
-              <td class="py-3 px-4">${typeBadge}</td>
-              <td class="py-3 px-4 text-xs text-slate-600 truncate max-w-[180px]" title="${sources}">${sources}</td>
-              <td class="py-3 px-4">
-                <select onchange="updateLeadStatus('${clean}', this.value)" class="text-xs py-1 px-2.5 rounded-lg border font-semibold ${statusColors[currentStatus] || 'bg-slate-100 text-slate-700'}">
-                  <option value="pending" ${currentStatus === 'pending' ? 'selected' : ''}>Pending</option>
-                  <option value="contacted" ${currentStatus === 'contacted' ? 'selected' : ''}>Contacted</option>
-                  <option value="replied" ${currentStatus === 'replied' ? 'selected' : ''}>Replied</option>
-                  <option value="converted" ${currentStatus === 'converted' ? 'selected' : ''}>Converted</option>
-                  <option value="ignored" ${currentStatus === 'ignored' ? 'selected' : ''}>Ignored</option>
+              <td class="py-3.5 px-4">${typeBadge}</td>
+              <td class="py-3.5 px-4 text-xs font-semibold text-slate-600 truncate max-w-[200px]" title="${sources}">${sources}</td>
+              <td class="py-3.5 px-4">
+                <select onchange="updateLeadStatus('${clean}', this.value)" class="text-xs py-1 px-3 rounded-lg border font-bold ${statusColors[currentStatus] || 'bg-slate-100 text-slate-700'} focus:outline-none cursor-pointer">
+                  <option value="pending" ${currentStatus === 'pending' ? 'selected' : ''}>⏳ Pending</option>
+                  <option value="contacted" ${currentStatus === 'contacted' ? 'selected' : ''}>✉️ Contacted</option>
+                  <option value="replied" ${currentStatus === 'replied' ? 'selected' : ''}>💬 Replied</option>
+                  <option value="converted" ${currentStatus === 'converted' ? 'selected' : ''}>🏆 Converted</option>
+                  <option value="ignored" ${currentStatus === 'ignored' ? 'selected' : ''}>🚫 Ignored</option>
                 </select>
               </td>
-              <td class="py-3 px-4 text-xs text-slate-500">${firstSeen}</td>
-              <td class="py-3 px-6 text-right">
-                <button onclick="deleteLead('${clean}')" title="Delete Lead" class="p-1.5 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-all">
+              <td class="py-3.5 px-4 text-xs font-semibold text-slate-500">${firstSeen}</td>
+              <td class="py-3.5 px-6 text-right">
+                <button onclick="deleteLead('${clean}')" title="Delete Lead" class="p-2 text-slate-400 hover:text-red-600 rounded-xl hover:bg-red-50 transition-all active:scale-95">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                 </button>
               </td>
@@ -1483,7 +1600,7 @@ def generate_frontend_html():
 
         document.getElementById('leads-pagination-info').innerText = `Showing ${leadsData.length} leads`;
       } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-red-500 font-semibold">Failed to load leads: ${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="py-12 text-center text-red-500 font-bold">Failed to load leads: ${e.message}</td></tr>`;
       }
     }
 
@@ -1568,13 +1685,29 @@ def generate_frontend_html():
     // --- MANUAL SENDING SECTION ---
     function updateImagePreview() {
       const url = document.getElementById('post-image-url').value.trim();
-      const container = document.getElementById('image-preview-container');
-      const img = document.getElementById('image-preview-img');
+      const container = document.getElementById('preview-bubble-image-box');
+      const img = document.getElementById('preview-bubble-img');
       if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
         img.src = url;
         container.classList.remove('hidden');
       } else {
         container.classList.add('hidden');
+      }
+    }
+
+    function updateTelegramBubblePreview() {
+      const text = document.getElementById('post-message-text').value.trim();
+      const btnText = document.getElementById('post-button-text').value.trim();
+      const bubbleText = document.getElementById('preview-bubble-text');
+      const btnBox = document.getElementById('preview-bubble-btn-box');
+      const btnLabel = document.getElementById('preview-bubble-btn-label');
+
+      bubbleText.innerText = text || 'Message preview will appear here...';
+      if (btnText) {
+        btnLabel.innerText = btnText;
+        btnBox.classList.remove('hidden');
+      } else {
+        btnBox.classList.add('hidden');
       }
     }
 
@@ -1612,15 +1745,15 @@ def generate_frontend_html():
         const listEl = document.getElementById('rotation-accounts-list');
 
         if (activeAccounts.length === 0) {
-          listEl.innerHTML = `<div class="p-2 w-full text-xs text-amber-700 bg-amber-50 rounded-lg border border-amber-200 flex items-center justify-between">
+          listEl.innerHTML = `<div class="p-3 w-full text-xs font-semibold text-amber-800 bg-amber-50 rounded-xl border border-amber-200 flex items-center justify-between">
             <span>⚠️ No active Telegram accounts connected!</span>
             <button onclick="switchTab('tab-accounts')" class="text-xs font-bold underline">Connect Accounts &rarr;</button>
           </div>`;
         } else {
           listEl.innerHTML = activeAccounts.map(a => `
-            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-white border border-slate-200 text-slate-700 shadow-2xs">
+            <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-white border border-slate-200/90 text-slate-800 shadow-2xs">
               <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
-              <span>${a.phone}</span>
+              <span class="font-mono">${a.phone}</span>
             </span>
           `).join('');
         }
@@ -1642,6 +1775,7 @@ def generate_frontend_html():
       document.getElementById('post-button-text').value = t.button_text || '';
       document.getElementById('post-button-url').value = t.button_url || '';
       updateImagePreview();
+      updateTelegramBubblePreview();
       showToast(`Loaded template: "${t.title}"`, 'info');
     }
 
@@ -1783,26 +1917,26 @@ def generate_frontend_html():
 
         document.getElementById('monitor-active-account').innerText = st.current_account || 'None';
         document.getElementById('monitor-active-lead').innerText = st.current_lead || 'None';
-        document.getElementById('monitor-campaign-title').innerText = st.post_title ? `Campaign: ${st.post_title}` : 'Campaign Monitor';
+        document.getElementById('monitor-campaign-title').innerText = st.post_title ? `Campaign: ${st.post_title}` : 'Campaign Dispatch Monitor';
 
         // Status pill
         const pill = document.getElementById('monitor-status-pill');
         const stopBtn = document.getElementById('btn-stop-campaign');
 
         if (st.is_running) {
-          pill.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700 animate-pulse';
-          pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-blue-600"></span><span>Running</span>';
+          pill.className = 'inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-700 animate-pulse';
+          pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-indigo-600"></span><span>Running</span>';
           stopBtn.classList.remove('hidden');
         } else if (st.status === 'completed') {
-          pill.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700';
+          pill.className = 'inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700';
           pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-600"></span><span>Completed</span>';
           stopBtn.classList.add('hidden');
         } else if (st.status === 'stopped') {
-          pill.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700';
+          pill.className = 'inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700';
           pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-600"></span><span>Stopped</span>';
           stopBtn.classList.add('hidden');
         } else {
-          pill.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600';
+          pill.className = 'inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600';
           pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-400"></span><span>Idle</span>';
           stopBtn.classList.add('hidden');
         }
@@ -1815,7 +1949,7 @@ def generate_frontend_html():
             let color = 'text-slate-300';
             if (l.includes('✅') || l.includes('Success')) color = 'text-emerald-400';
             if (l.includes('❌') || l.includes('Error') || l.includes('Flood')) color = 'text-red-400';
-            if (l.includes('🔄') || l.includes('Rotating')) color = 'text-blue-400';
+            if (l.includes('🔄') || l.includes('Rotating')) color = 'text-indigo-400';
             return `<div class="${color}">${l}</div>`;
           }).join('');
           terminal.scrollTop = terminal.scrollHeight;
@@ -1854,11 +1988,11 @@ def generate_frontend_html():
 
         if (accountsData.length === 0) {
           grid.innerHTML = `
-            <div class="col-span-full p-8 text-center bg-white rounded-2xl border border-slate-200 space-y-3">
-              <div class="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto text-2xl font-bold">🔑</div>
-              <h4 class="font-display font-bold text-slate-900 text-base">No Sending Accounts Connected</h4>
-              <p class="text-xs text-slate-500 max-w-sm mx-auto">Connect your Telegram user accounts here. The Manual Sending engine uses them to rotate outbound dispatches.</p>
-              <button onclick="openConnectAccountModal()" class="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs shadow-sm hover:bg-blue-700">Connect First Account</button>
+            <div class="col-span-full p-12 text-center bg-white rounded-3xl border border-slate-200/80 space-y-4 shadow-card">
+              <div class="w-14 h-14 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mx-auto text-2xl font-bold">🔑</div>
+              <h4 class="font-display font-extrabold text-slate-900 text-lg">No Sending Accounts Connected</h4>
+              <p class="text-xs text-slate-500 max-w-sm mx-auto font-medium">Connect your Telegram user accounts here. The Manual Sending engine uses them to rotate outbound messages safely.</p>
+              <button onclick="openConnectAccountModal()" class="px-5 py-2.5 rounded-xl bg-indigo-600 text-white font-bold text-xs shadow-sm shadow-indigo-500/25 hover:bg-indigo-700">Connect First Account</button>
             </div>
           `;
           return;
@@ -1867,40 +2001,40 @@ def generate_frontend_html():
         grid.innerHTML = accountsData.map(a => {
           const isAuthed = a.is_authorized !== false;
           const statusPill = isAuthed
-            ? `<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">🟢 Active & Ready</span>`
-            : `<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-700 border border-red-200">🔴 Needs Re-auth</span>`;
+            ? `<span class="px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/70">🟢 Active</span>`
+            : `<span class="px-3 py-1 rounded-full text-xs font-bold bg-red-50 text-red-700 border border-red-200/70">🔴 Re-auth</span>`;
 
           const name = [a.first_name, a.last_name].filter(Boolean).join(' ') || 'Telegram User';
           const username = a.username ? `@${a.username}` : 'No username';
           const sentToday = a.messages_sent_today || 0;
 
           return `
-            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 hover:border-slate-300 transition-all">
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card hover:shadow-card-hover transition-all space-y-4">
               <div class="flex items-start justify-between">
                 <div>
-                  <div class="font-mono font-bold text-slate-900 text-base">${a.phone}</div>
-                  <div class="text-xs text-slate-500 mt-0.5">${name} &bull; <span class="text-blue-600 font-medium">${username}</span></div>
+                  <div class="font-mono font-extrabold text-slate-900 text-base">${a.phone}</div>
+                  <div class="text-xs text-slate-500 mt-1 font-semibold">${name} &bull; <span class="text-indigo-600 font-bold">${username}</span></div>
                 </div>
                 <div>${statusPill}</div>
               </div>
 
-              <div class="grid grid-cols-2 gap-2 text-center p-2.5 bg-slate-50 rounded-xl border border-slate-100 text-xs">
+              <div class="grid grid-cols-2 gap-2 text-center p-3 bg-slate-50 rounded-2xl border border-slate-100 text-xs">
                 <div>
-                  <div class="text-[10px] text-slate-400 font-semibold uppercase">Slot</div>
+                  <div class="text-[10px] text-slate-400 font-bold uppercase">Assigned Slot</div>
                   <div class="font-bold text-slate-800">#${a.slot || 1}</div>
                 </div>
                 <div>
-                  <div class="text-[10px] text-slate-400 font-semibold uppercase">Sent Today</div>
-                  <div class="font-bold text-blue-600">${sentToday}</div>
+                  <div class="text-[10px] text-slate-400 font-bold uppercase">Sent Today</div>
+                  <div class="font-extrabold text-indigo-600">${sentToday}</div>
                 </div>
               </div>
 
               <div class="flex items-center gap-2 pt-1 border-t border-slate-100">
-                <button onclick="pingAccount('${a.phone}')" class="flex-1 py-1.5 px-3 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all">
+                <button onclick="pingAccount('${a.phone}')" class="flex-1 py-2 px-3 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-bold flex items-center justify-center gap-1.5 transition-all active:scale-95">
                   <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                   <span>Ping Test</span>
                 </button>
-                <button onclick="deleteAccount('${a.phone}')" class="py-1.5 px-3 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 text-xs font-semibold transition-all">
+                <button onclick="deleteAccount('${a.phone}')" class="py-2 px-3.5 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 text-xs font-bold transition-all active:scale-95">
                   <span>Disconnect</span>
                 </button>
               </div>
@@ -2049,13 +2183,13 @@ def generate_frontend_html():
         const byAccTbody = document.getElementById('reports-by-account-tbody');
         const accountsList = Object.entries(analytics.by_account || {});
         if (accountsList.length === 0) {
-          byAccTbody.innerHTML = `<tr><td colspan="3" class="py-4 text-center text-slate-400">No account dispatches recorded yet.</td></tr>`;
+          byAccTbody.innerHTML = `<tr><td colspan="3" class="py-5 text-center text-slate-400">No account dispatches recorded yet.</td></tr>`;
         } else {
           byAccTbody.innerHTML = accountsList.map(([phone, count]) => `
-            <tr>
-              <td class="py-2.5 px-3 font-mono font-semibold text-slate-800">${phone}</td>
-              <td class="py-2.5 px-3 text-slate-500">Sending Node</td>
-              <td class="py-2.5 px-3 text-right font-bold text-blue-600">${count} msgs</td>
+            <tr class="hover:bg-slate-50/80 transition-all">
+              <td class="py-3 px-3.5 font-mono font-bold text-slate-800">${phone}</td>
+              <td class="py-3 px-3.5 text-slate-500 font-semibold">Sending Node</td>
+              <td class="py-3 px-3.5 text-right font-extrabold text-indigo-600">${count} msgs</td>
             </tr>
           `).join('');
         }
@@ -2085,42 +2219,42 @@ def generate_frontend_html():
         const reports = data.reports || [];
 
         if (reports.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="7" class="py-12 text-center text-slate-400">No delivery logs recorded yet. Start a campaign in Manual Sending!</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="7" class="py-16 text-center text-slate-400 font-medium">No delivery logs recorded yet. Launch a campaign from Manual Sending!</td></tr>`;
           return;
         }
 
         tbody.innerHTML = reports.map(r => {
-          const sentAt = r.sent_at ? r.sent_at.substring(0, 19).replace('T', ' ') : 'Recent';
+          const sentAt = r.sent_at ? String(r.sent_at).substring(0, 19).replace('T', ' ') : 'Recent';
           const handle = r.recipient_username || '@unknown';
           const clean = handle.replace('@', '');
           const isBot = r.recipient_type === 'userbot' || r.recipient_type === 'bot';
           const typeBadge = isBot
-            ? `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700">🤖 Bot</span>`
-            : `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-50 text-purple-700">👤 User</span>`;
+            ? `<span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 text-indigo-700">🤖 Bot</span>`
+            : `<span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-purple-50 text-purple-700">👤 User</span>`;
 
           const isSuccess = r.status === 'sent';
           const statusBadge = isSuccess
-            ? `<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">✅ Sent</span>`
-            : `<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-700 border border-red-200">❌ Failed</span>`;
+            ? `<span class="px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/80">✅ Sent</span>`
+            : `<span class="px-3 py-1 rounded-full text-xs font-bold bg-red-50 text-red-700 border border-red-200/80">❌ Failed</span>`;
 
           const note = isSuccess ? (r.message_snippet || 'Delivered successfully') : (r.error_message || 'Delivery error');
 
           return `
-            <tr class="hover:bg-slate-50/75 transition-all">
-              <td class="py-3 px-6 text-xs text-slate-500 font-mono">${sentAt}</td>
-              <td class="py-3 px-4 font-semibold text-slate-900">
-                <a href="https://t.me/${clean}" target="_blank" class="hover:text-blue-600 hover:underline">${handle}</a>
+            <tr class="hover:bg-slate-50/80 transition-all">
+              <td class="py-3.5 px-6 text-xs text-slate-500 font-mono font-medium">${sentAt}</td>
+              <td class="py-3.5 px-4 font-bold text-slate-900">
+                <a href="https://t.me/${clean}" target="_blank" class="hover:text-indigo-600 hover:underline">${handle}</a>
               </td>
-              <td class="py-3 px-4">${typeBadge}</td>
-              <td class="py-3 px-4 text-xs font-mono text-slate-700">${r.sender_account_phone || 'Rotated'}</td>
-              <td class="py-3 px-4 text-xs text-slate-700 truncate max-w-[150px]">${r.post_title || 'Promotional Post'}</td>
-              <td class="py-3 px-4">${statusBadge}</td>
-              <td class="py-3 px-6 text-xs text-slate-500 truncate max-w-[200px]" title="${note}">${note}</td>
+              <td class="py-3.5 px-4">${typeBadge}</td>
+              <td class="py-3.5 px-4 text-xs font-mono font-bold text-slate-700">${r.sender_account_phone || 'Rotated'}</td>
+              <td class="py-3.5 px-4 text-xs font-bold text-slate-700 truncate max-w-[160px]">${r.post_title || 'Promotional Post'}</td>
+              <td class="py-3.5 px-4">${statusBadge}</td>
+              <td class="py-3.5 px-6 text-xs text-slate-500 truncate max-w-[220px]" title="${note}">${note}</td>
             </tr>
           `;
         }).join('');
       } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="7" class="py-8 text-center text-red-500">Failed to load reports: ${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" class="py-12 text-center text-red-500 font-bold">Failed to load reports: ${e.message}</td></tr>`;
       }
     }
 
@@ -2187,4 +2321,4 @@ def generate_frontend_html():
 </html>"""
 
 if __name__ == "__main__":
-    generate_web_py()
+    build_web_ui()

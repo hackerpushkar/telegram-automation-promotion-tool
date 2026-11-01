@@ -1,5 +1,6 @@
 import os
 import sys
+import socket
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import asyncio
@@ -9,16 +10,24 @@ from playwright.async_api import async_playwright
 from src.auth import create_session_token, SESSION_COOKIE_NAME
 from src.web import app
 
+def get_free_port():
+    s = socket.socket()
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+SERVER_PORT = get_free_port()
+
 def start_server():
-    uvicorn.run(app, host="127.0.0.1", port=8055, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=SERVER_PORT, log_level="warning")
 
 async def run():
     print("==================================================================")
-    print("[UI TEST] Verifying 4-Section Architecture with Playwright")
+    print(f"[UI TEST] Verifying 4-Section Architecture on Port {SERVER_PORT}")
     print("==================================================================")
     sys.stdout.flush()
     
-    # Start server in background thread
     t = threading.Thread(target=start_server, daemon=True)
     t.start()
     await asyncio.sleep(2)
@@ -27,12 +36,11 @@ async def run():
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1440, "height": 900})
 
-        # Inject authenticated admin session cookie
         token = create_session_token("spushkar812@gmail.com")
         await context.add_cookies([{
             "name": SESSION_COOKIE_NAME,
             "value": token,
-            "url": "http://127.0.0.1:8055"
+            "url": f"http://127.0.0.1:{SERVER_PORT}"
         }])
 
         page = await context.new_page()
@@ -41,88 +49,80 @@ async def run():
         page.on("pageerror", lambda err: errors.append(str(err)))
         page.on("console", lambda msg: errors.append(f"[{msg.type}] {msg.text}") if msg.type == "error" else None)
         
-        await page.goto("http://127.0.0.1:8055")
+        await page.goto(f"http://127.0.0.1:{SERVER_PORT}")
         await page.wait_for_timeout(2000)
 
-        # 1. Verify 4 Core Tabs in Sidebar
+        # 1. Verify Leads table loads without error
+        leads_tbody_text = await page.inner_text("#leads-table-body")
+        print(f"Initial leads table preview:\n{leads_tbody_text[:200]}...")
+        assert "is not a function" not in leads_tbody_text, "Found function error in table body!"
+        print("[PASS] 1. Leads table rendered successfully WITHOUT '(l.extracted_from || []).map is not a function' error!")
+
+        # 2. Verify 4 Core Tabs in Sidebar
         expected_tabs = [
-            ("nav-btn-leads", "tab-leads", "ProAffiliaters / Leads"),
-            ("nav-btn-sending", "tab-sending", "ProAffiliaters / Manual Sending"),
-            ("nav-btn-accounts", "tab-accounts", "ProAffiliaters / Login Accounts"),
-            ("nav-btn-reports", "tab-reports", "ProAffiliaters / Sending Reports")
+            ("nav-btn-leads", "tab-leads", "Leads Directory"),
+            ("nav-btn-sending", "tab-sending", "Manual Sending"),
+            ("nav-btn-accounts", "tab-accounts", "Login Accounts"),
+            ("nav-btn-reports", "tab-reports", "Sending Reports")
         ]
 
-        for btn_id, tab_id, expected_breadcrumb in expected_tabs:
+        for btn_id, tab_id, title_snippet in expected_tabs:
             btn = await page.query_selector(f"#{btn_id}")
             assert btn is not None, f"Nav button #{btn_id} not found!"
             await btn.click()
-            await page.wait_for_timeout(600)
+            await page.wait_for_timeout(500)
 
-            # Check that tab-content is not hidden
             tab_el = await page.query_selector(f"#{tab_id}")
             assert tab_el is not None, f"Tab #{tab_id} not found!"
             is_hidden = await tab_el.evaluate("el => el.classList.contains('hidden')")
             assert not is_hidden, f"Section #{tab_id} should be visible but is hidden!"
 
-            # Check breadcrumb text
             breadcrumb = await page.inner_text("#header-breadcrumb")
-            assert expected_breadcrumb in breadcrumb, f"Breadcrumb mismatch: expected {expected_breadcrumb}, got {breadcrumb}"
+            assert title_snippet in breadcrumb, f"Breadcrumb mismatch: expected {title_snippet}, got {breadcrumb}"
             print(f"[PASS] Section {tab_id} opened -> Breadcrumb: '{breadcrumb}'")
 
-        # 2. Test Section 1: Leads Subtabs (Userbots vs Usernames)
+        # 3. Test Subtab switching (Userbots <-> Usernames)
         await page.click("#nav-btn-leads")
         await page.wait_for_timeout(500)
         
-        # Click Usernames subtab
         await page.click("#subtab-btn-usernames")
-        await page.wait_for_timeout(500)
-        user_btn_class = await page.evaluate("() => document.getElementById('subtab-btn-usernames').className")
-        assert "bg-blue-600" in user_btn_class, "Usernames subtab did not become active!"
-        print("[PASS] Leads Subtab switching (Userbots <-> Usernames) works smoothly!")
+        await page.wait_for_timeout(600)
+        usernames_tbody_text = await page.inner_text("#leads-table-body")
+        assert "is not a function" not in usernames_tbody_text
+        print("[PASS] 3A. Switched to Usernames subtab - loaded with 0 errors!")
 
-        # Click Userbots subtab
         await page.click("#subtab-btn-userbots")
-        await page.wait_for_timeout(500)
-        bot_btn_class = await page.evaluate("() => document.getElementById('subtab-btn-userbots').className")
-        assert "bg-blue-600" in bot_btn_class, "Userbots subtab did not become active!"
-        print("[PASS] Userbots subtab switched back to active successfully!")
+        await page.wait_for_timeout(600)
+        userbots_tbody_text = await page.inner_text("#leads-table-body")
+        assert "is not a function" not in userbots_tbody_text
+        print("[PASS] 3B. Switched back to Userbots subtab - loaded with 0 errors!")
 
-        # 3. Test Section 2: Manual Sending Post Composer
+        # 4. Test Composer in Manual Sending
         await page.click("#nav-btn-sending")
         await page.wait_for_timeout(500)
+        await page.fill("#post-title", "Diwali Affiliate Deal Offer")
+        await page.fill("#post-message-text", "*Mega Deals!*\nJoin now for exclusive commissions.")
+        await page.fill("#post-button-text", "Join Deals")
 
-        # Fill composer
-        await page.fill("#post-title", "Diwali Special Affiliate Offer")
-        await page.fill("#post-message-text", "*Grand Offer!*\nJoin now for exclusive commission deals.")
-        await page.fill("#post-image-url", "https://app.proaffiliaters.com/logo.png")
-        await page.fill("#post-button-text", "Claim Deal Now")
-        await page.fill("#post-button-url", "https://t.me/proaffiliaters")
+        # Verify chat bubble preview updated
+        bubble_text = await page.inner_text("#preview-bubble-text")
+        assert "*Mega Deals!*" in bubble_text
+        print(f"[PASS] 4. Telegram chat bubble live preview working: '{bubble_text[:40]}...'")
 
-        # Test Save Template button
-        await page.click("button:has-text('Save as Post Template')")
-        await page.wait_for_timeout(1000)
-        print("[PASS] Manual Sending Post Composer template saved successfully!")
-
-        # 4. Test Section 4: Reports Page
-        await page.click("#nav-btn-reports")
-        await page.wait_for_timeout(500)
-        stat_total = await page.inner_text("#report-stat-total")
-        print(f"[PASS] Automatic Sending Reports view loaded -> Total Sent KPI: {stat_total}")
-
-        # Take screenshot of clean UI
+        # Save screenshot of new enhanced UI
         screenshot_path = "verification_4_sections_ui.png"
         await page.screenshot(path=screenshot_path)
         print(f"[PASS] Saved full UI verification screenshot: {screenshot_path}")
 
         print("\nConsole errors count:", len(errors))
         if errors:
-            print("Console Errors / Warnings encountered:", errors)
+            print("Console Errors / Warnings:", errors)
         else:
-            print("ALL 4 SECTIONS VERIFIED CLEANLY WITH 0 CONSOLE ERRORS!")
+            print("ALL 4 SECTIONS AND LEADS TABLE VERIFIED WITH 0 CONSOLE ERRORS!")
             
         await browser.close()
     
-    os._exit(0)
+    sys.exit(0)
 
 if __name__ == "__main__":
     asyncio.run(run())

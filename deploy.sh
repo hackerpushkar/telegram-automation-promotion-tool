@@ -42,8 +42,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DOMAIN="telegramtools.proaffiliaters.com"
 APP_PORT="8000"
 PM2_APP_NAME="telegram-promotion-tool"
-NGINX_SITE_CONF="/etc/nginx/sites-available/telegramtools-proaffiliaters"
-NGINX_SITE_LINK="/etc/nginx/sites-enabled/telegramtools-proaffiliaters"
+NGINX_SITE_CONF="/etc/nginx/sites-available/telegramtools.proaffiliaters.com.conf"
+NGINX_SITE_LINK="/etc/nginx/sites-enabled/telegramtools.proaffiliaters.com.conf"
+NGINX_CONFD_CONF="/etc/nginx/conf.d/telegramtools.proaffiliaters.com.conf"
+OLD_SITE_CONF="/etc/nginx/sites-available/telegramtools-proaffiliaters"
+OLD_SITE_LINK="/etc/nginx/sites-enabled/telegramtools-proaffiliaters"
 
 # ------------------------------------------------------------------------------
 # Function: Configure Nginx Reverse Proxy
@@ -56,17 +59,55 @@ setup_nginx_proxy() {
     return 1
   fi
 
-  log_info "Writing $NGINX_SITE_CONF..."
-  sudo bash -c "cat > $NGINX_SITE_CONF" << EOF
+  # Clean up any legacy non-.conf configuration files
+  sudo rm -f "$OLD_SITE_LINK" "$OLD_SITE_CONF" 2>/dev/null || true
+
+  # Check if SSL certificate already exists on the VPS
+  SSL_CERT="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
+  SSL_KEY="/etc/letsencrypt/live/$APP_DOMAIN/privkey.pem"
+
+  # Determine target config file path
+  TARGET_CONF="$NGINX_SITE_CONF"
+  USE_SYMLINK=true
+  if [ ! -d "/etc/nginx/sites-available" ]; then
+    sudo mkdir -p /etc/nginx/conf.d
+    TARGET_CONF="$NGINX_CONFD_CONF"
+    USE_SYMLINK=false
+  else
+    sudo mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+  fi
+
+  log_info "Writing Nginx configuration to $TARGET_CONF..."
+
+  if [ -f "$SSL_CERT" ] && [ -f "$SSL_KEY" ]; then
+    log_info "Discovered existing SSL certificates for $APP_DOMAIN. Enabling full HTTPS server block..."
+    sudo bash -c "cat > $TARGET_CONF" << EOF
 # ==============================================================================
-# Nginx Reverse Proxy Configuration for Telegram Promotion Tool
+# Nginx Reverse Proxy Configuration with HTTPS for Telegram Promotion Tool
 # Domain: $APP_DOMAIN
 # Internal Upstream: http://127.0.0.1:$APP_PORT
 # ==============================================================================
 
+# HTTP -> HTTPS Redirect
 server {
     listen 80;
+    listen [::]:80;
     server_name $APP_DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+
+# HTTPS Server
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $APP_DOMAIN;
+
+    # SSL Certificates
+    ssl_certificate $SSL_CERT;
+    ssl_certificate_key $SSL_KEY;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
 
     client_max_body_size 50M;
 
@@ -82,7 +123,7 @@ server {
         proxy_pass http://127.0.0.1:$APP_PORT;
         proxy_http_version 1.1;
 
-        # WebSocket and Long-Polling headers (critical for live dashboard streaming)
+        # WebSocket and Long-Polling headers
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
@@ -109,9 +150,67 @@ server {
     }
 }
 EOF
+  else
+    log_info "SSL certificates not yet present. Writing standard HTTP port 80 block..."
+    sudo bash -c "cat > $TARGET_CONF" << EOF
+# ==============================================================================
+# Nginx Reverse Proxy Configuration for Telegram Promotion Tool
+# Domain: $APP_DOMAIN
+# Internal Upstream: http://127.0.0.1:$APP_PORT
+# ==============================================================================
 
-  log_info "Enabling site symlink in /etc/nginx/sites-enabled/..."
-  sudo ln -sf "$NGINX_SITE_CONF" "$NGINX_SITE_LINK"
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $APP_DOMAIN;
+
+    client_max_body_size 50M;
+
+    # Gzip Compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+    # Dashboard & API Proxy
+    location / {
+        proxy_pass http://127.0.0.1:$APP_PORT;
+        proxy_http_version 1.1;
+
+        # WebSocket and Long-Polling headers
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+
+        # Real Client IP Resolution
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        # Timeouts for streaming and long-lived Telegram connections
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 75s;
+        proxy_send_timeout 300s;
+    }
+
+    # Static Assets Cache (Thumbnails & Promotion Banners)
+    location /promo-assets/ {
+        proxy_pass http://127.0.0.1:$APP_PORT/promo-assets/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800, immutable";
+    }
+}
+EOF
+  fi
+
+  if [ "$USE_SYMLINK" = true ]; then
+    log_info "Enabling site symlink in /etc/nginx/sites-enabled/..."
+    sudo ln -sf "$NGINX_SITE_CONF" "$NGINX_SITE_LINK"
+  fi
 
   log_info "Testing Nginx configuration syntax..."
   if sudo nginx -t; then
@@ -125,7 +224,7 @@ EOF
 
   echo ""
   log_success "Nginx reverse proxy for $APP_DOMAIN is active!"
-  echo -e "   • Domain  : ${BOLD}http://$APP_DOMAIN${NC}"
+  echo -e "   • Domain  : ${BOLD}https://$APP_DOMAIN${NC}"
   echo -e "   • Upstream: ${BOLD}http://127.0.0.1:$APP_PORT${NC}\n"
 }
 
@@ -135,11 +234,18 @@ EOF
 setup_ssl_certbot() {
   log_step "Setting up Let's Encrypt SSL Certificate for $APP_DOMAIN"
 
-  # Automatically ensure Nginx reverse proxy is configured and active first
-  if [ ! -f "$NGINX_SITE_LINK" ] || [ ! -f "$NGINX_SITE_CONF" ]; then
-    log_info "Nginx server block for $APP_DOMAIN not found. Automatically setting up Nginx first..."
+  SSL_CERT="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
+  SSL_KEY="/etc/letsencrypt/live/$APP_DOMAIN/privkey.pem"
+
+  # If certificate already exists, apply HTTPS proxy directly
+  if [ -f "$SSL_CERT" ] && [ -f "$SSL_KEY" ]; then
+    log_info "Certificate already exists at $SSL_CERT. Updating Nginx with SSL..."
     setup_nginx_proxy
+    return 0
   fi
+
+  # Automatically ensure Nginx reverse proxy is configured and active first
+  setup_nginx_proxy
 
   if ! command -v certbot > /dev/null 2>&1; then
     log_warn "Certbot not found. Attempting to install certbot and python3-certbot-nginx..."
@@ -148,7 +254,10 @@ setup_ssl_certbot() {
 
   log_info "Requesting & installing SSL certificate for $APP_DOMAIN..."
   sudo certbot --nginx -d "$APP_DOMAIN" --non-interactive --agree-tos --redirect --register-unsafely-without-email || \
-  sudo certbot --nginx -d "$APP_DOMAIN" --redirect
+  sudo certbot certonly --webroot -w /var/www/html -d "$APP_DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email || true
+
+  # Re-run setup_nginx_proxy to write clean SSL block once certs exist
+  setup_nginx_proxy
 
   log_success "SSL Certificate configured successfully!"
   echo -e "   • Secure URL: ${BOLD}https://$APP_DOMAIN${NC}\n"
