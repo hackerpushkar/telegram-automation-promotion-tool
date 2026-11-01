@@ -1,24 +1,22 @@
 import os
+import csv
+import io
 import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src.config import settings
 from src.db import Database
-from src.models import Lead, LeadType, LeadStatus, LeadSourceInfo
+from src.models import Lead, LeadType, LeadStatus, LeadSourceInfo, PromotionalPost, SendingReport
 from src.extractor import extract_leads_from_text
 from src.api_client import ProaffiliatersApiClient
-from src.info_bot import info_bot
-from src.channel_publisher import get_promo_post_preview, publish_promo_post, publish_all_promo_posts, BASE_PROMO_DIR
-from src.bot_forwarder import bot_forwarder
 from src.account_manager import AccountManager
-from src.drip_engine import DripEngine
-from src.keyword_search_engine import KeywordSearchEngine
+from src.delivery_engine import delivery_engine
 from src.auth import (
     create_session_token,
     verify_session_token,
@@ -33,14 +31,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Telegram Promotion Tool Dashboard",
-    description="ProAffiliaters Lead Extraction & Management Interface",
-    version="1.0.0"
+    description="ProAffiliaters Lead Extraction & Outreach Interface",
+    version="2.0.0"
 )
-
-# Mount promotional assets directory for web UI thumbnails
-if os.path.exists(BASE_PROMO_DIR):
-    app.mount("/promo-assets", StaticFiles(directory=BASE_PROMO_DIR), name="promo-assets")
-
 
 @app.middleware("http")
 async def auth_guard_middleware(request: Request, call_next):
@@ -50,7 +43,6 @@ async def auth_guard_middleware(request: Request, call_next):
     if (
         not settings.dashboard_auth_enabled
         or path in ["/login", "/api/auth/login", "/api/auth/status", "/api/auth/logout", "/favicon.ico"]
-        or path.startswith("/promo-assets/")
     ):
         return await call_next(request)
 
@@ -70,15 +62,9 @@ activity_logs: List[Dict[str, Any]] = [
     {
         "timestamp": datetime.utcnow().strftime("%H:%M:%S"),
         "type": "info",
-        "message": "Telegram Promotion Tool dashboard initialized."
-    },
-    {
-        "timestamp": datetime.utcnow().strftime("%H:%M:%S"),
-        "type": "sync",
-        "message": f"Connected to ProAffiliaters API ({settings.proaffiliaters_api_url}) at 30-minute intervals."
+        "message": "ProAffiliaters Lead Engine initialized."
     }
 ]
-
 
 def log_activity(message: str, log_type: str = "info"):
     """Adds an entry to the live activity log."""
@@ -92,15 +78,45 @@ def log_activity(message: str, log_type: str = "info"):
         activity_logs.pop()
 
 
-# --- Pydantic Schemas for API Requests ---
+# --- Pydantic Schemas ---
 class LoginRequest(BaseModel):
     email: str
     password: str
 
-
 class StatusUpdateRequest(BaseModel):
     status: str
 
+class AddLeadRequest(BaseModel):
+    username: str
+    lead_type: str = "bot"  # "bot" or "user"
+    source: Optional[str] = "Manual Entry"
+
+class CreatePostRequest(BaseModel):
+    title: str
+    message_text: str
+    image_url: Optional[str] = None
+    button_text: Optional[str] = None
+    button_url: Optional[str] = None
+
+class StartManualSendingRequest(BaseModel):
+    target_type: str = "all_userbots"  # all_userbots, all_usernames, uncontacted, custom
+    custom_leads: Optional[List[str]] = None
+    message_text: str
+    image_url: Optional[str] = None
+    button_text: Optional[str] = None
+    button_url: Optional[str] = None
+    post_title: Optional[str] = "Manual Campaign"
+    delay_seconds: int = 15
+    max_per_account: int = 50
+
+class StartAccountLoginRequest(BaseModel):
+    phone: str
+    slot: Optional[int] = None
+
+class CompleteAccountLoginRequest(BaseModel):
+    session_token: str
+    code: Optional[str] = None
+    password: Optional[str] = None
 
 class ScanTestRequest(BaseModel):
     bio_text: str
@@ -108,78 +124,14 @@ class ScanTestRequest(BaseModel):
     invite_link: Optional[str] = "https://t.me/test_channel"
 
 
-class BroadcastRequest(BaseModel):
-    message_text: str
-    buttons_markup: Optional[str] = None
-    photo_url: Optional[str] = None
-
-
-class PublishChannelRequest(BaseModel):
-    post_number: int  # 1 to 5, or 0 for all
-    channel_username: Optional[str] = None
-
-
-class TestForwardRequest(BaseModel):
-    bot_username: str
-    post_number: int
-    channel_message_id: Optional[int] = None
-    channel_username: Optional[str] = None
-
-
-class StartCampaignRequest(BaseModel):
-    post_number: int
-    channel_message_id: int
-    channel_username: Optional[str] = None
-    delay_seconds: int = 8
-    target_limit: int = 100
-
-
-class CampaignControlRequest(BaseModel):
-    action: str  # pause, resume, stop
-
-class TelegramApiConfigRequest(BaseModel):
-    api_id: int
-    api_hash: str
-
-
-class StartAccountLoginRequest(BaseModel):
-    phone: str
-    slot: Optional[int] = None
-
-
-class CompleteAccountLoginRequest(BaseModel):
-    session_token: str
-    code: Optional[str] = None
-    password: Optional[str] = None
-
-
-class ExecuteDripStageRequest(BaseModel):
-    stage: int
-    batch_size: int = 20
-    delay_seconds: float = 12.0
-
-
-class AddKeywordRequest(BaseModel):
-    keyword: str
-    category: Optional[str] = "deals"
-
-
-class ToggleKeywordRequest(BaseModel):
-    enabled: bool
-
-
-class SearchKeywordNowRequest(BaseModel):
-    keyword: Optional[str] = None
-    limit: int = 15
-
-
 # --- API Routes ---
 
+# 1. Authentication
 @app.post("/api/auth/login")
 async def login_endpoint(req: LoginRequest):
     """Authenticates admin and returns a signed 30-day session token."""
     if not authenticate_user(req.email, req.password):
-        log_activity(f"Failed dashboard login attempt for email: '{req.email}'", "info")
+        log_activity(f"Failed dashboard login attempt for: '{req.email}'", "info")
         return JSONResponse(
             status_code=401,
             content={"error": "Invalid email or password. Please verify your credentials."}
@@ -201,10 +153,9 @@ async def login_endpoint(req: LoginRequest):
         max_age=SESSION_MAX_AGE_SECONDS,
         httponly=True,
         samesite="lax",
-        secure=False  # Compatible across HTTP reverse-proxy and HTTPS
+        secure=False
     )
     return res
-
 
 @app.post("/api/auth/logout")
 async def logout_endpoint():
@@ -212,7 +163,6 @@ async def logout_endpoint():
     res = JSONResponse(content={"success": True, "message": "Logged out successfully."})
     res.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     return res
-
 
 @app.get("/api/auth/status")
 async def auth_status_endpoint(request: Request):
@@ -224,22 +174,44 @@ async def auth_status_endpoint(request: Request):
         "auth_enabled": settings.dashboard_auth_enabled
     }
 
+# 2. Real-time Dashboard Stats
 @app.get("/api/stats")
 async def get_dashboard_stats():
-    """Returns real-time lead counts and system status."""
-    stats = await Database.get_stats()
-    stats["api_url"] = settings.proaffiliaters_api_url
-    stats["sync_interval"] = f"{settings.sync_interval_minutes} Minutes"
-    stats["telegram_configured"] = bool(settings.telegram_api_id and settings.telegram_api_hash)
-    return stats
+    """Returns aggregated stats across leads, accounts, and sending engine."""
+    leads = await Database.get_leads(limit=10000)
+    accounts = await Database.get_all_telegram_accounts()
+    reports_analytics = await Database.get_sending_reports_analytics()
 
+    userbots_count = sum(1 for l in leads if l.get("lead_type") == "bot" or (l.get("username", "").lower().endswith("bot")))
+    usernames_count = sum(1 for l in leads if l.get("lead_type") == "user" and not (l.get("username", "").lower().endswith("bot")))
+    contacted_count = sum(1 for l in leads if l.get("status") in ["contacted", "replied", "converted"])
 
+    active_accounts = sum(1 for a in accounts if a.get("is_authorized", True))
+
+    return {
+        "total_leads": len(leads),
+        "userbots_count": userbots_count,
+        "usernames_count": usernames_count,
+        "contacted_count": contacted_count,
+        "pending_count": len(leads) - contacted_count,
+        "total_accounts": len(accounts),
+        "active_accounts": active_accounts,
+        "messages_sent_today": reports_analytics.get("sent_today", 0),
+        "total_messages_sent": reports_analytics.get("total_sent", 0),
+        "success_rate_percent": reports_analytics.get("success_rate_percent", 100.0),
+        "api_url": settings.proaffiliaters_api_url,
+        "sync_interval": f"{settings.sync_interval_minutes} Minutes",
+        "telegram_configured": bool(settings.telegram_api_id and settings.telegram_api_hash),
+        "campaign_status": delivery_engine.get_campaign_status()
+    }
+
+# 3. Section 1: Leads
 @app.get("/api/leads")
 async def list_leads(
     search: Optional[str] = Query(None),
     lead_type: Optional[str] = Query("all"),
     status: Optional[str] = Query("all"),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(200, ge=1, le=1000),
     skip: int = Query(0, ge=0)
 ):
     """Returns filtered leads."""
@@ -252,245 +224,172 @@ async def list_leads(
     )
     return {"count": len(leads), "leads": leads}
 
+@app.post("/api/leads")
+async def add_lead_manual(req: AddLeadRequest):
+    """Manually adds a new lead to MongoDB."""
+    clean_handle = req.username.strip().lstrip("@")
+    if not clean_handle:
+        return JSONResponse(status_code=400, content={"error": "Username is required."})
+
+    is_bot = (req.lead_type.lower() == "bot") or clean_handle.lower().endswith("bot")
+    lead_type_enum = LeadType.BOT if is_bot else LeadType.USER
+
+    lead = Lead(
+        username=f"@{clean_handle}",
+        username_clean=clean_handle.lower(),
+        lead_type=lead_type_enum,
+        status=LeadStatus.PENDING,
+        first_seen_at=datetime.utcnow(),
+        extracted_from=LeadSourceInfo(
+            source_name=req.source or "Manual Entry",
+            source_invite_link="",
+            platform="telegram",
+            source_id="manual_entry"
+        )
+    )
+    is_new, _ = await Database.upsert_lead(lead)
+    log_activity(f"Added lead: @{clean_handle} ({lead_type_enum.value})", "lead")
+    return {"success": True, "is_new": is_new, "username": clean_handle}
 
 @app.patch("/api/leads/{username_clean}/status")
 async def update_lead_status(username_clean: str, req: StatusUpdateRequest):
-    """Updates a lead's outreach status."""
-    success = await Database.update_status(username_clean, req.status)
+    """Updates lead outreach status."""
+    clean = username_clean.strip().lstrip("@").lower()
+    success = await Database.update_status(clean, req.status)
     if success:
-        log_activity(f"Updated lead @{username_clean} status to '{req.status}'", "update")
-        return {"success": True, "username": username_clean, "status": req.status}
-    return JSONResponse(status_code=404, content={"error": "Lead not found"})
+        log_activity(f"Updated lead @{clean} status to '{req.status}'", "update")
+        return {"success": True, "username": clean, "status": req.status}
+    return JSONResponse(status_code=404, content={"error": "Lead not found."})
 
+@app.delete("/api/leads/{username_clean}")
+async def delete_lead_endpoint(username_clean: str):
+    """Deletes a lead from MongoDB."""
+    clean = username_clean.strip().lstrip("@").lower()
+    ok = await Database.delete_lead(clean)
+    if ok:
+        log_activity(f"Deleted lead @{clean}", "info")
+    return {"success": ok}
 
-@app.post("/api/scan-test")
-async def scan_test_bio(req: ScanTestRequest):
-    """Extracts leads from arbitrary bio text or invite link for testing."""
-    leads = extract_leads_from_text(
-        bio_text=req.bio_text,
-        source_name=req.channel_name or "Test Channel",
-        source_invite_link=req.invite_link or "",
-        source_id="manual_test"
-    )
-    # Save the extracted leads into the database
-    saved_count = 0
-    for lead in leads:
-        is_new, _ = await Database.upsert_lead(lead)
-        if is_new:
-            saved_count += 1
-            log_activity(f"Extracted & saved new lead: @{lead.username} ({lead.lead_type.value})", "lead")
-
-    return {
-        "extracted_count": len(leads),
-        "newly_saved": saved_count,
-        "leads": [l.model_dump() for l in leads]
-    }
-
-
-@app.post("/api/trigger-sync")
-async def trigger_manual_sync():
-    """Triggers an immediate external source fetch from ProAffiliaters API."""
-    log_activity("Manual 30-minute sync cycle initiated by user from Web UI.", "sync")
-    api_client = ProaffiliatersApiClient()
-    sources = await api_client.fetch_recent_sources()
-    
-    if not sources:
-        log_activity("External API sync finished: No new source channels found in current window.", "info")
-        return {"status": "none", "message": "No new sources found in window", "sources_count": 0}
-
-    log_activity(f"External API sync returned {len(sources)} source channel(s).", "sync")
-    return {
-        "status": "success",
-        "sources_count": len(sources),
-        "sources": [s.model_dump() for s in sources]
-    }
-
-
-@app.get("/api/logs")
-async def get_activity_logs():
-    """Returns recent activity log stream."""
-    return {"logs": activity_logs}
-
-
-# --- Official Info Bot (@ProaffiliatersInfoBot) REST Endpoints ---
-
-@app.get("/api/info-bot/status")
-async def get_info_bot_status():
-    """Returns operational status and lead counts of @ProaffiliatersInfoBot."""
-    return await info_bot.get_status()
-
-
-@app.get("/api/info-bot/users")
-async def get_info_bot_users_list(
-    search: Optional[str] = Query(None),
-    is_blocked: Optional[bool] = Query(None),
-    limit: int = Query(50, ge=1, le=200),
-    skip: int = Query(0, ge=0)
+@app.get("/api/leads/export-csv")
+async def export_leads_csv(
+    lead_type: Optional[str] = Query("all"),
+    status: Optional[str] = Query("all"),
+    search: Optional[str] = Query(None)
 ):
-    """Returns paginated leads registered with @ProaffiliatersInfoBot."""
-    users = await Database.get_info_bot_users(
-        search=search,
-        is_blocked=is_blocked,
-        limit=limit,
-        skip=skip
+    """Exports filtered leads as CSV."""
+    leads = await Database.get_leads(search=search, lead_type=lead_type, status=status, limit=10000)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Username", "Lead Type", "Status", "Discovered From", "First Seen At", "Last Contacted At"])
+    for l in leads:
+        raw_src = l.get("extracted_from")
+        source_str = "Direct"
+        if isinstance(raw_src, dict):
+            source_str = raw_src.get("source_name") or raw_src.get("channel_name") or "Direct"
+        elif isinstance(raw_src, list):
+            items = []
+            for item in raw_src:
+                if isinstance(item, dict):
+                    name = item.get("source_name") or item.get("channel_name")
+                    if name:
+                        items.append(name)
+                elif isinstance(item, str):
+                    items.append(item)
+            source_str = ", ".join(items) or "Direct"
+        elif isinstance(raw_src, str):
+            source_str = raw_src or "Direct"
+
+        writer.writerow([
+            l.get("username", ""),
+            l.get("lead_type", ""),
+            l.get("status", ""),
+            source_str,
+            l.get("first_seen_at", ""),
+            l.get("last_contacted_at", "")
+        ])
+    filename = f"leads_{lead_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
-    return {"count": len(users), "users": users}
 
+# 4. Section 2: Promotional Posts & Manual Sending
+@app.get("/api/posts")
+async def list_promotional_posts():
+    """Returns all saved promotional post templates."""
+    posts = await Database.get_all_promotional_posts()
+    return {"count": len(posts), "posts": posts}
 
-@app.get("/api/info-bot/broadcasts")
-async def get_info_bot_broadcasts_list(limit: int = Query(20, ge=1, le=50)):
-    """Returns recent broadcast audit history."""
-    broadcasts = await Database.get_info_bot_broadcasts(limit=limit)
-    return {"count": len(broadcasts), "broadcasts": broadcasts}
+@app.post("/api/posts")
+async def save_promotional_post_endpoint(req: CreatePostRequest):
+    """Creates/saves a promotional post template."""
+    if not req.title.strip() or not req.message_text.strip():
+        return JSONResponse(status_code=400, content={"error": "Title and Message Text are required."})
 
-
-@app.post("/api/info-bot/broadcast")
-async def send_info_bot_broadcast_endpoint(req: BroadcastRequest):
-    """Triggers a background broadcast across all registered active Info Bot leads."""
-    if not req.message_text or not req.message_text.strip():
-        return JSONResponse(status_code=400, content={"error": "message_text is required"})
-
-    log_activity(f"Admin triggered Info Bot broadcast: '{req.message_text[:35]}...'", "broadcast")
-    res = await info_bot.broadcast_from_api(
+    post = PromotionalPost(
+        title=req.title.strip(),
         message_text=req.message_text.strip(),
-        buttons_markup=req.buttons_markup,
-        photo_url=req.photo_url
+        image_url=req.image_url.strip() if req.image_url else None,
+        button_text=req.button_text.strip() if req.button_text else None,
+        button_url=req.button_url.strip() if req.button_url else None
     )
-    return res
+    saved = await Database.save_promotional_post(post)
+    log_activity(f"Saved promotional post template: '{post.title}'", "sync")
+    return {"success": True, "post": saved}
 
+@app.delete("/api/posts/{post_id}")
+async def delete_promotional_post_endpoint(post_id: str):
+    """Deletes a promotional post template."""
+    ok = await Database.delete_promotional_post(post_id)
+    if ok:
+        log_activity(f"Deleted promotional post template {post_id}", "info")
+    return {"success": ok}
 
-# --- Admin Bot Outreach REST Endpoints ---
+@app.post("/api/sending/start")
+async def start_manual_sending(req: StartManualSendingRequest):
+    """Starts a promotional sending campaign with account rotation."""
+    if not req.message_text.strip():
+        return JSONResponse(status_code=400, content={"error": "Message text is required."})
 
-@app.get("/api/bot-outreach/posts")
-async def get_bot_outreach_posts():
-    """Returns previews and channel publication statuses of all 5 promo posts."""
-    published_map = {p["post_number"]: p for p in await Database.get_all_published_posts()}
-    posts = []
-    for num in range(1, 6):
-        preview = get_promo_post_preview(num)
-        pub = published_map.get(num)
-        posts.append({
-            "post_number": num,
-            "title": preview["title"],
-            "image_name": preview["image_name"],
-            "image_url": f"/promo-assets/{preview['image_name']}",
-            "caption": preview["caption"],
-            "deep_link": preview["deep_link"],
-            "is_published": pub is not None,
-            "channel_username": pub.get("channel_username") if pub else settings.promo_channel_username,
-            "message_id": pub.get("message_id") if pub else None,
-            "message_link": pub.get("message_link") if pub else None,
-            "published_at": pub.get("published_at") if pub else None,
-        })
-    return {"posts": posts, "promo_channel": settings.promo_channel_username}
+    status = delivery_engine.get_campaign_status()
+    if status.get("is_running"):
+        return JSONResponse(status_code=400, content={"error": "A campaign is already running. Please stop or wait for it to complete."})
 
-
-@app.post("/api/bot-outreach/publish")
-async def publish_to_channel_endpoint(req: PublishChannelRequest):
-    """Publishes one or all promotional posts into @pro_affiliaters with deep-link inline buttons."""
-    try:
-        if req.post_number == 0:
-            results = await publish_all_promo_posts(req.channel_username)
-            log_activity(f"Published all 5 promotional posts to {req.channel_username or settings.promo_channel_username}", "sync")
-            return {"success": True, "results": results}
-        else:
-            rec = await publish_promo_post(req.post_number, req.channel_username)
-            log_activity(f"Published Post #{req.post_number} to channel (Msg #{rec['message_id']})", "sync")
-            return {"success": True, "published": rec}
-    except Exception as e:
-        logger.exception("Failed to publish to channel: %s", e)
-        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
-
-
-@app.get("/api/bot-outreach/status")
-async def get_bot_outreach_status():
-    """Returns live forwarder status, uncontacted bot leads, and campaign history."""
-    status = bot_forwarder.get_status()
-    uncontacted = await Database.get_uncontacted_bots(limit=500)
-    campaigns = await Database.get_bot_campaigns(limit=10)
-    return {
-        **status,
-        "uncontacted_bots_count": len(uncontacted),
-        "uncontacted_bots": [b.get("username") for b in uncontacted[:20]],
-        "promo_channel": settings.promo_channel_username,
-        "campaigns": campaigns
-    }
-
-
-@app.post("/api/bot-outreach/test-forward")
-async def test_forward_endpoint(req: TestForwardRequest):
-    """Forwards a published post to a single bot handle for testing/dry-run."""
-    clean_bot = req.bot_username.strip().lstrip("@")
-    if not clean_bot:
-        return JSONResponse(status_code=400, content={"error": "bot_username is required"})
-
-    msg_id = req.channel_message_id
-    if not msg_id:
-        pub = await Database.get_published_post(req.post_number)
-        if pub:
-            msg_id = pub.get("message_id")
-
-    if not msg_id:
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Post #{req.post_number} has not been published yet! Publish it to the channel first."}
-        )
-
-    res = await bot_forwarder.forward_to_single_bot(
-        bot_username=clean_bot,
-        channel_message_id=msg_id,
-        channel_username=req.channel_username
+    success, message = await delivery_engine.start_campaign(
+        target_type=req.target_type,
+        custom_leads=req.custom_leads,
+        message_text=req.message_text,
+        image_url=req.image_url,
+        button_text=req.button_text,
+        button_url=req.button_url,
+        post_title=req.post_title or "Manual Campaign",
+        delay_seconds=req.delay_seconds,
+        max_per_account=req.max_per_account
     )
+    if not success:
+        return JSONResponse(status_code=400, content={"error": message})
 
-    if res.get("success"):
-        log_activity(f"Test forwarded Post #{req.post_number} to @{clean_bot}", "lead")
-    else:
-        log_activity(f"Test forward to @{clean_bot} failed: {res.get('error')}", "info")
+    log_activity(f"Promotional campaign dispatched: {message}", "sync")
+    return {"success": True, "message": message, "status": delivery_engine.get_campaign_status()}
 
-    return res
+@app.get("/api/sending/status")
+async def get_sending_campaign_status():
+    """Returns the live status, progress, and real-time logs of the dispatch engine."""
+    return delivery_engine.get_campaign_status()
 
+@app.post("/api/sending/stop")
+async def stop_sending_campaign():
+    """Stops the active sending campaign."""
+    ok = delivery_engine.stop_campaign()
+    log_activity("Promotional sending campaign stopped by user.", "info")
+    return {"success": ok, "status": delivery_engine.get_campaign_status()}
 
-@app.post("/api/bot-outreach/start-campaign")
-async def start_bot_campaign_endpoint(req: StartCampaignRequest):
-    """Starts a batch forwarding campaign targeting uncontacted bot leads from MongoDB."""
-    try:
-        res = await bot_forwarder.start_campaign(
-            post_number=req.post_number,
-            channel_message_id=req.channel_message_id,
-            channel_username=req.channel_username,
-            delay_seconds=req.delay_seconds,
-            target_limit=req.target_limit
-        )
-        log_activity(f"Started Bot Outreach Campaign for Post #{req.post_number} ({res.get('total_targeted')} bots)", "broadcast")
-        return {"success": True, "campaign": res}
-    except Exception as e:
-        logger.exception("Failed to start bot campaign: %s", e)
-        return JSONResponse(status_code=400, content={"success": False, "error": str(e)})
-
-
-@app.post("/api/bot-outreach/control")
-async def control_bot_campaign_endpoint(req: CampaignControlRequest):
-    """Pauses, resumes, or stops the running bot outreach campaign."""
-    action = req.action.lower().strip()
-    if action == "pause":
-        ok = bot_forwarder.pause_campaign()
-    elif action == "resume":
-        ok = bot_forwarder.resume_campaign()
-    elif action == "stop":
-        ok = bot_forwarder.stop_campaign()
-    else:
-        return JSONResponse(status_code=400, content={"error": f"Invalid action '{req.action}'. Expected pause/resume/stop."})
-
-    return {"success": ok, "status": bot_forwarder.get_status()}
-
-
-# --- Multi-Account Management Endpoints ---
-
+# 5. Section 3: Login Accounts
 @app.get("/api/accounts")
 async def get_accounts_list():
     """Returns all registered Telegram accounts and their slot assignments."""
     accounts = await Database.get_all_telegram_accounts()
-    # Mask session strings for security
     safe_accounts = []
     for acc in accounts:
         safe_copy = dict(acc)
@@ -498,18 +397,16 @@ async def get_accounts_list():
         safe_accounts.append(safe_copy)
     return {"count": len(safe_accounts), "accounts": safe_accounts}
 
-
 @app.post("/api/accounts/login/start")
 async def start_account_login_endpoint(req: StartAccountLoginRequest):
     """Initiates phone login by requesting OTP code from Telegram MTProto."""
     try:
         res = await AccountManager.start_phone_login(req.phone, req.slot)
-        log_activity(f"Initiated Telegram login for {req.phone} (Assigned Slot #{res.get('slot')})", "sync")
+        log_activity(f"Initiated Telegram login for {req.phone}", "sync")
         return res
     except Exception as e:
         logger.error("Failed to start phone login: %s", e)
         return JSONResponse(status_code=400, content={"error": str(e)})
-
 
 @app.post("/api/accounts/login/complete")
 async def complete_account_login_endpoint(req: CompleteAccountLoginRequest):
@@ -518,12 +415,11 @@ async def complete_account_login_endpoint(req: CompleteAccountLoginRequest):
         res = await AccountManager.complete_phone_login(req.session_token, req.code, req.password)
         if res.get("status") == "success":
             acc = res.get("account", {})
-            log_activity(f"Connected Telegram account {acc.get('phone')} into Slot #{acc.get('slot')}", "sync")
+            log_activity(f"Connected Telegram account {acc.get('phone')} (Ready for Rotation)", "sync")
         return res
     except Exception as e:
         logger.error("Failed to complete phone login: %s", e)
         return JSONResponse(status_code=400, content={"error": str(e)})
-
 
 @app.post("/api/accounts/{phone}/ping")
 async def ping_account_endpoint(phone: str):
@@ -535,7 +431,6 @@ async def ping_account_endpoint(phone: str):
         logger.error("Failed to ping account %s: %s", phone, e)
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-
 @app.delete("/api/accounts/{phone}")
 async def delete_account_endpoint(phone: str):
     """Removes a registered Telegram account from MongoDB."""
@@ -544,10 +439,9 @@ async def delete_account_endpoint(phone: str):
         log_activity(f"Removed Telegram account {phone}", "info")
     return {"success": ok}
 
-
 @app.post("/api/accounts/clear-demo")
 async def clear_demo_accounts_endpoint():
-    """Removes mock/demo accounts (+1999...) from MongoDB."""
+    """Removes mock/demo accounts from MongoDB."""
     accounts = await Database.get_all_telegram_accounts()
     cleared = 0
     for acc in accounts:
@@ -558,176 +452,100 @@ async def clear_demo_accounts_endpoint():
     log_activity(f"Cleared {cleared} demo Telegram accounts from database.", "info")
     return {"success": True, "cleared_count": cleared}
 
+# 6. Section 4: Automatic Sending Report
+@app.get("/api/reports/analytics")
+async def get_reports_analytics():
+    """Returns analytics on all sent promotional messages."""
+    return await Database.get_sending_reports_analytics()
 
-@app.post("/api/config/telegram")
-async def save_telegram_config(req: TelegramApiConfigRequest):
-    """Saves Telegram MTProto API ID and Hash into settings and .env."""
-    clean_hash = req.api_hash.strip()
-    if not req.api_id or not clean_hash:
-        return JSONResponse(status_code=400, content={"error": "Both API ID and API HASH are required."})
-
-    settings.telegram_api_id = req.api_id
-    settings.telegram_api_hash = clean_hash
-
-    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-    if os.path.exists(env_path):
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            new_lines = []
-            id_set = False
-            hash_set = False
-            for line in lines:
-                if line.startswith("TELEGRAM_API_ID="):
-                    new_lines.append(f"TELEGRAM_API_ID={req.api_id}\n")
-                    id_set = True
-                elif line.startswith("TELEGRAM_API_HASH="):
-                    new_lines.append(f"TELEGRAM_API_HASH={clean_hash}\n")
-                    hash_set = True
-                else:
-                    new_lines.append(line)
-            if not id_set:
-                new_lines.append(f"TELEGRAM_API_ID={req.api_id}\n")
-            if not hash_set:
-                new_lines.append(f"TELEGRAM_API_HASH={clean_hash}\n")
-            with open(env_path, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-        except Exception as e:
-            logger.error("Failed to write to .env: %s", e)
-
-    log_activity(f"Configured Telegram API credentials (API ID: {req.api_id}).", "sync")
-    return {"success": True, "telegram_configured": True}
-
-
-# --- 5-Week Drip Funnel Endpoints ---
-
-@app.get("/api/drip/overview")
-async def get_drip_overview_endpoint():
-    """Returns funnel analytics, ready bot counts, and 5-stage metadata."""
-    overview = await DripEngine.get_drip_overview()
-    return overview
-
-
-@app.post("/api/drip/execute-stage")
-async def execute_drip_stage_endpoint(req: ExecuteDripStageRequest):
-    """Executes a single week/stage forwarding batch using that stage's assigned account."""
-    try:
-        log_activity(f"Starting 5-Week Drip Stage #{req.stage} batch forwarding...", "broadcast")
-        res = await DripEngine.execute_drip_stage(req.stage, req.batch_size, req.delay_seconds)
-        log_activity(
-            f"Stage #{req.stage} batch finished: {res.get('successful')}/{res.get('targeted')} delivered successfully.",
-            "broadcast"
-        )
-        return res
-    except Exception as e:
-        logger.exception("Failed to execute drip stage #%d: %s", req.stage, e)
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-
-# --- Autonomous Telegram Keyword Search Endpoints ---
-
-@app.get("/api/keywords")
-async def get_keywords_overview():
-    """Returns all configured target keywords, active statuses, and KPI stats."""
-    keywords = await Database.get_search_keywords()
-    stats = await Database.get_keyword_search_stats()
-    return {
-        "status": "success",
-        "stats": stats,
-        "keywords": keywords,
-        "autonomous_enabled": settings.keyword_search_enabled,
-        "interval_minutes": settings.keyword_search_interval_minutes
-    }
-
-
-@app.post("/api/keywords")
-async def add_keyword_endpoint(req: AddKeywordRequest):
-    """Adds a new target keyword for automated channel discovery."""
-    try:
-        doc = await Database.add_search_keyword(req.keyword, req.category or "deals")
-        log_activity(f"Added target keyword '{req.keyword}' in category '{req.category}'", "sync")
-        return {"status": "success", "keyword": doc}
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-
-@app.patch("/api/keywords/{keyword}/toggle")
-async def toggle_keyword_endpoint(keyword: str, req: ToggleKeywordRequest):
-    """Enables or disables an automated search keyword."""
-    success = await Database.toggle_search_keyword(keyword, req.enabled)
-    if success:
-        action = "enabled" if req.enabled else "paused"
-        log_activity(f"Keyword '{keyword}' {action}", "update")
-        return {"status": "success", "keyword": keyword, "enabled": req.enabled}
-    return JSONResponse(status_code=404, content={"error": "Keyword not found"})
-
-
-@app.delete("/api/keywords/{keyword}")
-async def delete_keyword_endpoint(keyword: str):
-    """Deletes a target search keyword."""
-    success = await Database.delete_search_keyword(keyword)
-    if success:
-        log_activity(f"Deleted target keyword '{keyword}'", "update")
-        return {"status": "success", "keyword": keyword}
-    return JSONResponse(status_code=404, content={"error": "Keyword not found"})
-
-
-@app.post("/api/keywords/search-now")
-async def search_keyword_now_endpoint(req: SearchKeywordNowRequest):
-    """Executes an immediate live MTProto search for a keyword and extracts leads."""
-    if not req.keyword:
-        return JSONResponse(status_code=400, content={"error": "Keyword must be provided."})
-
-    log_activity(f"Starting live Telegram directory search for '{req.keyword}'...", "sync")
-    res = await KeywordSearchEngine.search_keyword(req.keyword, limit=req.limit or 15)
-    if res.get("status") == "success":
-        log_activity(
-            f"Search '{req.keyword}' complete: Discovered {res.get('channels_found')} channels, extracted {res.get('leads_extracted')} leads.",
-            "sync"
-        )
-    return res
-
-
-@app.post("/api/keywords/autonomous/cycle")
-async def run_autonomous_cycle_endpoint():
-    """Triggers one full autonomous discovery cycle across oldest searched keywords."""
-    log_activity("Triggered manual autonomous keyword discovery cycle...", "sync")
-    res = await KeywordSearchEngine.run_autonomous_cycle(max_keywords=2)
-    return res
-
-
-@app.get("/api/keywords/channels")
-async def get_discovered_channels_endpoint(
-    limit: int = Query(50, ge=1, le=200),
+@app.get("/api/reports")
+async def get_sending_reports_list(
+    limit: int = Query(100, ge=1, le=1000),
     skip: int = Query(0, ge=0),
-    search: Optional[str] = Query(None),
-    keyword: Optional[str] = Query(None)
+    status: Optional[str] = Query(None)
 ):
-    """Returns channels discovered via Telegram keyword searches."""
-    channels = await Database.get_discovered_channels(limit=limit, skip=skip, search=search, keyword=keyword)
-    return {"count": len(channels), "channels": channels}
+    """Returns recent message sending audit logs."""
+    reports = await Database.get_sending_reports(limit=limit, skip=skip, status=status)
+    total_count = await Database.get_sending_reports_count(status=status)
+    return {"count": len(reports), "total_count": total_count, "reports": reports}
 
+@app.get("/api/reports/export-csv")
+async def export_sending_reports_csv(status: Optional[str] = Query(None)):
+    """Exports sending reports audit log as CSV."""
+    reports = await Database.get_sending_reports(limit=10000, status=status)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Timestamp", "Recipient Handle", "Lead Type", "Sender Account Phone", "Sender Account Name", "Post Title", "Status", "Error Message", "Message Snippet"])
+    for r in reports:
+        writer.writerow([
+            r.get("sent_at", ""),
+            r.get("recipient_username", ""),
+            r.get("recipient_type", ""),
+            r.get("sender_account_phone", ""),
+            r.get("sender_account_name", ""),
+            r.get("post_title", ""),
+            r.get("status", ""),
+            r.get("error_message", ""),
+            r.get("message_snippet", "")
+        ])
+    filename = f"sending_reports_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
-# --- Web UI Main Page (Pure Clean Modern Light Mode) ---
+# 7. Utilities & Manual Trigger
+@app.post("/api/trigger-sync")
+async def trigger_manual_sync():
+    """Triggers an immediate external source fetch from ProAffiliaters API."""
+    log_activity("Manual 30-minute sync cycle initiated by admin from Web UI.", "sync")
+    api_client = ProaffiliatersApiClient()
+    sources = await api_client.fetch_recent_sources()
+    if not sources:
+        log_activity("External API sync finished: No new source channels found.", "info")
+        return {"status": "none", "message": "No new sources found in window", "sources_count": 0}
+
+    log_activity(f"External API sync found {len(sources)} source channels. Processing...", "lead")
+    return {"status": "success", "message": f"Discovered {len(sources)} channels", "sources_count": len(sources)}
+
+@app.get("/api/logs")
+async def get_recent_activity_logs():
+    """Returns recent dashboard activity logs."""
+    return {"logs": activity_logs[:50]}
+
+@app.post("/api/scan-test")
+async def scan_test_bio(req: ScanTestRequest):
+    """Extracts leads from bio text for testing."""
+    leads = extract_leads_from_text(
+        bio_text=req.bio_text,
+        source_name=req.channel_name or "Test Channel",
+        source_invite_link=req.invite_link or "",
+        source_id="manual_test"
+    )
+    saved_count = 0
+    for lead in leads:
+        is_new, _ = await Database.upsert_lead(lead)
+        if is_new:
+            saved_count += 1
+            log_activity(f"Extracted lead: @{lead.username} ({lead.lead_type.value})", "lead")
+    return {"extracted_count": len(leads), "newly_saved": saved_count, "leads": [l.model_dump() for l in leads]}
+
+# --- UI Routes ---
 @app.get("/login", response_class=HTMLResponse)
 async def serve_login(request: Request):
-    """Serves the login page or redirects to dashboard if already authenticated."""
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=302)
     return LOGIN_HTML_CONTENT
 
-
 @app.get("/logout")
 async def logout_redirect():
-    """Logs out by clearing cookie and redirecting to login page."""
     res = RedirectResponse(url="/login", status_code=302)
     res.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     return res
 
-
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
-    """Serves the dashboard for authenticated users or the login screen if unauthenticated."""
     if settings.dashboard_auth_enabled and not is_authenticated(request):
         return LOGIN_HTML_CONTENT
     return HTML_CONTENT
@@ -1151,7 +969,6 @@ LOGIN_HTML_CONTENT = """<!DOCTYPE html>
 </html>
 """
 
-
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1160,3625 +977,1598 @@ HTML_CONTENT = """<!DOCTYPE html>
   <title>ProAffiliaters | Telegram Lead Engine</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            display: ['Outfit', 'sans-serif'],
+          },
+          colors: {
+            primary: {
+              50: '#eff6ff',
+              100: '#dbeafe',
+              500: '#3b82f6',
+              600: '#2563eb',
+              700: '#1d4ed8',
+            }
+          }
+        }
+      }
+    }
+  </script>
   <style>
-    /* =========================================================
-       PROAFFILIATERS SIGNATURE SYSTEM (PREMIUM SAAS SIDEBAR THEME)
-       ========================================================= */
-    :root {
-      --bg-body: #f4f7fe;
-      --bg-card: #ffffff;
-      --bg-card-subtle: #f8faff;
-      --bg-input: #ffffff;
-      
-      --border-subtle: rgba(59, 91, 250, 0.1);
-      --border-strong: rgba(59, 91, 250, 0.2);
-      
-      --text-main: #1a1f5e;
-      --text-muted: #475569;
-      --text-subtle: #6b78c4;
-      
-      /* ProAffiliaters Signature Palette */
-      --primary: #3b5bfa;
-      --primary-hover: #2f4fe6;
-      --primary-light: #eef2ff;
-      --primary-border: rgba(59, 91, 250, 0.2);
-      
-      --success: #059669;
-      --success-light: #d1fae5;
-      --success-border: #a7f3d0;
-      
-      --warning: #d97706;
-      --warning-light: #fef3c7;
-      
-      --info: #0284c7;
-      --info-light: #e0f2fe;
-      
-      --purple: #7c3aed;
-      --purple-light: #ede9fe;
-      
-      --radius-sm: 8px;
-      --radius-md: 12px;
-      --radius-lg: 16px;
-      --radius-full: 9999px;
-      
-      --shadow-sm: 0 1px 3px rgba(59, 91, 250, 0.05);
-      --shadow-md: 0 4px 20px rgba(59, 91, 250, 0.06);
-      --shadow-lg: 0 10px 30px rgba(59, 91, 250, 0.1);
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-
-    body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-      background-color: var(--bg-body);
-      color: var(--text-main);
-      min-height: 100vh;
-      -webkit-font-smoothing: antialiased;
-      overflow-x: hidden;
-    }
-
-    /* Master Layout Shell */
-    .app-shell {
-      display: flex;
-      min-height: 100vh;
-      width: 100%;
-      position: relative;
-    }
-
-    /* Left Sidebar */
-    .app-sidebar {
-      width: 270px;
-      flex-shrink: 0;
-      background: #ffffff;
-      border-right: 1px solid var(--border-subtle);
-      box-shadow: 2px 0 24px rgba(59, 91, 250, 0.05);
-      display: flex;
-      flex-direction: column;
-      position: sticky;
-      top: 0;
-      height: 100vh;
-      overflow-y: auto;
-      z-index: 100;
-      transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    .sidebar-brand {
-      padding: 20px 20px 18px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-
-    .brand-logo-box {
-      width: 40px;
-      height: 40px;
-      border-radius: 12px;
-      background: linear-gradient(135deg, #3b5bfa 0%, #7c3aed 100%);
-      color: white;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-family: 'Outfit', sans-serif;
-      font-size: 21px;
-      font-weight: 800;
-      box-shadow: 0 4px 14px rgba(59, 91, 250, 0.35);
-      flex-shrink: 0;
-    }
-
-    .brand-title {
-      font-family: 'Outfit', sans-serif;
-      font-size: 17px;
-      font-weight: 800;
-      color: var(--text-main);
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      line-height: 1.2;
-    }
-
-    .brand-pill {
-      font-size: 9px;
-      font-weight: 800;
-      padding: 2px 6px;
-      border-radius: 6px;
-      background: var(--primary-light);
-      color: var(--primary);
-      border: 1px solid var(--primary-border);
-      letter-spacing: 0.5px;
-    }
-
-    .brand-subtitle {
-      font-size: 11.5px;
-      color: var(--text-subtle);
-      font-weight: 500;
-      margin-top: 2px;
-    }
-
-    .sidebar-menu {
-      padding: 14px 14px 20px;
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .menu-section-label {
-      font-size: 10.5px;
-      font-weight: 700;
-      color: var(--text-subtle);
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
-      padding: 16px 10px 6px;
-    }
-
-    .menu-section-label:first-child {
-      padding-top: 4px;
-    }
-
-    .nav-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      padding: 10px 12px;
-      border-radius: 10px;
-      font-size: 13.5px;
-      font-weight: 500;
-      color: #475569;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      text-align: left;
-      width: 100%;
-      transition: all 0.16s ease;
-      font-family: inherit;
-      position: relative;
-    }
-
-    .nav-item-left {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .nav-icon {
-      font-size: 16px;
-      width: 22px;
-      text-align: center;
-      display: inline-block;
-    }
-
-    .nav-label {
-      line-height: 1;
-    }
-
-    .nav-item:hover {
-      background: #f0f3ff;
-      color: var(--primary);
-      transform: translateX(2px);
-    }
-
-    .nav-item.active {
-      background: var(--primary-light);
-      color: var(--primary);
-      font-weight: 700;
-      box-shadow: inset 3px 0 0 var(--primary);
-    }
-
-    .nav-badge {
-      font-size: 11px;
-      font-weight: 700;
-      padding: 2px 7px;
-      border-radius: 9999px;
-      background: #f1f5f9;
-      color: #64748b;
-      min-width: 20px;
-      text-align: center;
-      line-height: 1.3;
-    }
-
-    .nav-item.active .nav-badge {
-      background: #dde3ff;
-      color: var(--primary);
-    }
-
-    .badge-primary {
-      background: #e0e7ff;
-      color: var(--primary);
-    }
-
-    /* Sidebar Footer Status Widget */
-    .sidebar-status-card {
-      margin: 12px 14px 18px;
-      background: #f8faff;
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      padding: 12px 14px;
-    }
-
-    .status-indicator-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--success);
-      margin-bottom: 4px;
-    }
-
-    .status-api-name {
-      font-size: 11px;
-      color: var(--text-subtle);
-      margin-bottom: 8px;
-      font-family: monospace;
-    }
-
-    .status-footer-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 11px;
-      color: #64748b;
-      border-top: 1px solid rgba(59, 91, 250, 0.08);
-      padding-top: 8px;
-    }
-
-    .status-tag {
-      background: #d1fae5;
-      color: #059669;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-weight: 700;
-    }
-
-    /* Main App Area */
-    .main-wrapper {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-      min-height: 100vh;
-    }
-
-    /* App Top Bar */
-    .app-topbar {
-      background: #ffffff;
-      border-bottom: 1px solid var(--border-subtle);
-      padding: 14px 28px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      position: sticky;
-      top: 0;
-      z-index: 40;
-      box-shadow: 0 1px 3px rgba(59, 91, 250, 0.04);
-    }
-
-    .topbar-left {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .mobile-toggle-btn {
-      display: none;
-      background: transparent;
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 6px 10px;
-      font-size: 18px;
-      cursor: pointer;
-      color: var(--text-main);
-    }
-
-    .view-breadcrumb {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13.5px;
-    }
-
-    .crumb-root {
-      font-weight: 500;
-      color: var(--text-subtle);
-    }
-
-    .crumb-separator {
-      color: #cbd5e1;
-    }
-
-    .crumb-active {
-      font-weight: 700;
-      color: var(--text-main);
-      font-family: 'Outfit', sans-serif;
-    }
-
-    .topbar-right {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .pill-active {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      background: var(--success-light);
-      border: 1px solid var(--success-border);
-      color: var(--success);
-      padding: 6px 14px;
-      border-radius: var(--radius-full);
-      font-size: 12px;
-      font-weight: 600;
-    }
-
-    .pulse-dot {
-      width: 8px;
-      height: 8px;
-      background: var(--success);
-      border-radius: 50%;
-      box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.7);
-      animation: pulse 2s infinite;
-    }
-
-    @keyframes pulse {
-      0% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.6); }
-      70% { box-shadow: 0 0 0 8px rgba(5, 150, 105, 0); }
-      100% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0); }
-    }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      padding: 9px 18px;
-      font-size: 13px;
-      font-weight: 600;
-      border-radius: var(--radius-md);
-      border: 1px solid transparent;
-      cursor: pointer;
-      transition: all 0.18s ease;
-      font-family: inherit;
-    }
-
-    .btn-primary {
-      background: linear-gradient(135deg, #3b5bfa 0%, #4338ca 100%);
-      color: white;
-      box-shadow: 0 2px 6px rgba(59, 91, 250, 0.25);
-    }
-
-    .btn-primary:hover {
-      background: linear-gradient(135deg, #2f4fe6 0%, #3730a3 100%);
-      box-shadow: 0 4px 12px rgba(59, 91, 250, 0.35);
-      transform: translateY(-1px);
-    }
-
-    .btn-outline {
-      background: var(--bg-card);
-      border-color: var(--border-strong);
-      color: var(--text-main);
-    }
-
-    .btn-outline:hover {
-      background: var(--bg-card-subtle);
-      border-color: var(--text-subtle);
-    }
-
-    /* Main Content Area */
-    .main-content {
-      padding: 24px 28px;
-      flex: 1;
-      width: 100%;
-      max-width: 1560px;
-    }
-
-    .app-footer {
-      padding: 16px 28px;
-      text-align: center;
-      font-size: 12px;
-      color: var(--text-subtle);
-      border-top: 1px solid var(--border-subtle);
-      background: #ffffff;
-    }
-
-    /* Mobile Drawer */
-    .sidebar-backdrop {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(15, 23, 42, 0.45);
-      backdrop-filter: blur(3px);
-      z-index: 90;
-    }
-
-    @media (max-width: 1024px) {
-      .app-sidebar {
-        position: fixed;
-        top: 0;
-        left: 0;
-        bottom: 0;
-        transform: translateX(-100%);
-        box-shadow: 4px 0 30px rgba(15, 23, 42, 0.15);
-      }
-      .app-sidebar.open {
-        transform: translateX(0);
-      }
-      .sidebar-backdrop.open {
-        display: block;
-      }
-      .mobile-toggle-btn {
-        display: inline-flex !important;
-      }
-      .main-content {
-        padding: 16px;
-      }
-      .app-topbar {
-        padding: 12px 16px;
-      }
-    }
-
-    /* Stat Cards Grid */
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 16px;
-      margin-bottom: 24px;
-    }
-
-    .stat-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-lg);
-      padding: 20px;
-      box-shadow: var(--shadow-sm);
-      position: relative;
-      overflow: hidden;
-      transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-
-    .stat-card:hover {
-      transform: translateY(-2px);
-      box-shadow: var(--shadow-md);
-      border-color: var(--primary-border);
-    }
-
-    .stat-card-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
-    }
-
-    .stat-title {
-      font-size: 12.5px;
-      font-weight: 700;
-      color: var(--text-subtle);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-
-    .stat-icon {
-      width: 36px;
-      height: 36px;
-      border-radius: var(--radius-md);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 18px;
-    }
-
-    .stat-value {
-      font-size: 32px;
-      font-weight: 800;
-      color: var(--text-main);
-      font-family: 'Outfit', sans-serif;
-      line-height: 1.1;
-      margin-bottom: 6px;
-    }
-
-    .stat-subtitle {
-      font-size: 12px;
-      color: var(--text-subtle);
-      font-weight: 500;
-    }
-
-    /* Section Views */
-    .view-content {
-      display: none;
-      animation: fadeIn 0.18s ease-in-out;
-    }
-
-    .view-content.active {
-      display: block;
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(4px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    /* Filter Bar */
-    .filter-bar {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-lg);
-      padding: 16px 20px;
-      margin-bottom: 20px;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: 14px;
-      box-shadow: var(--shadow-sm);
-    }
-
-    .filter-left {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex: 1;
-      min-width: 320px;
-    }
-
-    .search-box {
-      position: relative;
-      flex: 1;
-    }
-
-    .search-box input {
-      width: 100%;
-      padding: 10px 14px 10px 38px;
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      font-size: 13px;
-      font-family: inherit;
-      background: var(--bg-card);
-      color: var(--text-main);
-      outline: none;
-      transition: border-color 0.15s ease;
-    }
-
-    .search-box input:focus {
-      border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
-    }
-
-    .search-icon {
-      position: absolute;
-      left: 12px;
-      top: 50%;
-      transform: translateY(-50%);
-      color: var(--text-subtle);
-      pointer-events: none;
-    }
-
-    .type-pills {
-      display: flex;
-      background: var(--bg-card-subtle);
-      padding: 3px;
-      border-radius: var(--radius-md);
-      gap: 4px;
-    }
-
-    .type-pill-btn {
-      padding: 6px 14px;
-      font-size: 12px;
-      font-weight: 600;
-      border: none;
-      background: transparent;
-      color: var(--text-subtle);
-      border-radius: var(--radius-sm);
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-
-    .type-pill-btn.active {
-      background: var(--bg-card);
-      color: var(--text-main);
-      box-shadow: var(--shadow-sm);
-    }
-
-    .select-status {
-      padding: 9px 14px;
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      font-size: 13px;
-      font-family: inherit;
-      background: var(--bg-card);
-      color: var(--text-main);
-      cursor: pointer;
-      outline: none;
-    }
-
-    /* Leads Table */
-    .table-container {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-lg);
-      box-shadow: var(--shadow-sm);
-      overflow-x: auto;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      text-align: left;
-    }
-
-    thead th {
-      background: var(--bg-card-subtle);
-      padding: 14px 18px;
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--text-subtle);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-
-    tbody td {
-      padding: 16px 18px;
-      font-size: 13px;
-      border-bottom: 1px solid var(--border-subtle);
-      color: var(--text-main);
-      vertical-align: middle;
-    }
-
-    tbody tr:last-child td {
-      border-bottom: none;
-    }
-
-    tbody tr:hover {
-      background-color: #fafbfc;
-    }
-
-    /* Lead Item Elements */
-    .lead-profile {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .lead-avatar {
-      width: 36px;
-      height: 36px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 700;
-      font-size: 14px;
-      flex-shrink: 0;
-    }
-
-    .avatar-user {
-      background: var(--info-light);
-      color: var(--info);
-      border: 1px solid #bae6fd;
-    }
-
-    .avatar-bot {
-      background: var(--purple-light);
-      color: var(--purple);
-      border: 1px solid #ddd6fe;
-    }
-
-    .lead-meta {
-      display: flex;
-      flex-direction: column;
-    }
-
-    .lead-username {
-      font-weight: 700;
-      color: var(--text-main);
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .lead-username:hover {
-      color: var(--primary);
-    }
-
-    .btn-copy {
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      color: var(--text-subtle);
-      font-size: 12px;
-      padding: 2px 4px;
-      border-radius: 4px;
-      transition: color 0.15s ease;
-    }
-
-    .btn-copy:hover {
-      color: var(--primary);
-      background: var(--primary-light);
-    }
-
-    .badge-type {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 3px 10px;
-      border-radius: var(--radius-full);
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
-    }
-
-    .badge-user {
-      background: var(--info-light);
-      color: var(--info);
-      border: 1px solid #bae6fd;
-    }
-
-    .badge-bot {
-      background: var(--purple-light);
-      color: var(--purple);
-      border: 1px solid #ddd6fe;
-    }
-
-    .badge-status {
-      display: inline-block;
-      padding: 4px 10px;
-      border-radius: var(--radius-full);
-      font-size: 11px;
-      font-weight: 700;
-      cursor: pointer;
-      border: 1px solid transparent;
-    }
-
-    .status-new {
-      background: var(--success-light);
-      color: var(--success);
-      border-color: var(--success-border);
-    }
-
-    .status-contacted {
-      background: var(--warning-light);
-      color: var(--warning);
-      border-color: #fde68a;
-    }
-
-    .status-converted {
-      background: var(--primary-light);
-      color: var(--primary);
-      border-color: var(--primary-border);
-    }
-
-    .status-ignored {
-      background: var(--bg-card-subtle);
-      color: var(--text-subtle);
-      border-color: var(--border-strong);
-    }
-
-    .channel-source {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .channel-name {
-      font-weight: 600;
-      color: var(--text-main);
-    }
-
-    .channel-link {
-      font-size: 11px;
-      color: var(--text-subtle);
-      text-decoration: none;
-    }
-
-    .channel-link:hover {
-      color: var(--primary);
-      text-decoration: underline;
-    }
-
-    .bio-snippet {
-      max-width: 320px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      color: var(--text-muted);
-      font-size: 12px;
-      background: var(--bg-card-subtle);
-      padding: 4px 8px;
-      border-radius: 6px;
-      border: 1px solid var(--border-subtle);
-    }
-
-    /* Live Activity Log Stream */
-    .log-container {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-lg);
-      padding: 20px;
-      box-shadow: var(--shadow-sm);
-    }
-
-    .log-entry {
-      display: flex;
-      align-items: flex-start;
-      gap: 12px;
-      padding: 10px 0;
-      border-bottom: 1px solid var(--border-subtle);
-      font-size: 13px;
-    }
-
-    .log-entry:last-child {
-      border-bottom: none;
-    }
-
-    .log-time {
-      font-family: monospace;
-      color: var(--text-subtle);
-      font-size: 12px;
-      flex-shrink: 0;
-    }
-
-    .log-badge {
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-      flex-shrink: 0;
-    }
-
-    .log-sync { background: var(--primary-light); color: var(--primary); }
-    .log-lead { background: var(--success-light); color: var(--success); }
-    .log-info { background: var(--info-light); color: var(--info); }
-    .log-update { background: var(--warning-light); color: var(--warning); }
-
-    /* Playground / Scanner Test Card */
-    .scanner-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-lg);
-      padding: 24px;
-      box-shadow: var(--shadow-sm);
-      max-width: 900px;
-    }
-
-    .form-group {
-      margin-bottom: 18px;
-    }
-
-    .form-group label {
-      display: block;
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text-main);
-      margin-bottom: 6px;
-    }
-
-    .form-input, .form-textarea {
-      width: 100%;
-      padding: 11px 14px;
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      font-size: 13px;
-      font-family: inherit;
-      color: var(--text-main);
-      background: var(--bg-card);
-      outline: none;
-      transition: border-color 0.15s ease;
-    }
-
-    .form-input:focus, .form-textarea:focus {
-      border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
-    }
-
-    /* Toast Notification */
-    #toast {
-      position: fixed;
-      bottom: 24px;
-      right: 24px;
-      background: #0f172a;
-      color: white;
-      padding: 12px 20px;
-      border-radius: var(--radius-md);
-      font-size: 13px;
-      font-weight: 600;
-      box-shadow: var(--shadow-lg);
-      transform: translateY(100px);
-      opacity: 0;
-      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-      z-index: 9999;
-    }
-
-    #toast.show {
-      transform: translateY(0);
-      opacity: 1;
-    }
-
-    /* Empty state */
-    .empty-state {
-      text-align: center;
-      padding: 48px 24px;
-      color: var(--text-subtle);
-    }
-
-    .empty-icon {
-      font-size: 40px;
-      margin-bottom: 12px;
-    }
-
-    /* Footer */
-    footer {
-      border-top: 1px solid var(--border-subtle);
-      background: var(--bg-card);
-      padding: 16px 24px;
-      text-align: center;
-      font-size: 12px;
-      color: var(--text-subtle);
-    }
+    body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+    .font-display { font-family: 'Outfit', sans-serif; }
+    .nav-item.active { background-color: #eff6ff; color: #2563eb; font-weight: 600; }
+    .nav-item.active svg { color: #2563eb; }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
   </style>
 </head>
-<body>
+<body class="min-h-screen text-slate-800 flex flex-col">
 
-  <!-- ProAffiliaters Master App Shell -->
-  <div class="app-shell">
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="fixed top-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
-    <!-- Mobile Drawer Backdrop -->
-    <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
+  <div class="flex-1 flex overflow-hidden min-h-screen">
 
-    <!-- LEFT PREMIUM SIDEBAR -->
-    <aside class="app-sidebar" id="app-sidebar">
-      
-      <!-- Brand Box -->
-      <div class="sidebar-brand">
-        <div class="brand-logo-box">P</div>
-        <div class="brand-info">
-          <div class="brand-title">
-            <span>ProAffiliaters</span>
-            <span class="brand-pill">LEAD ENGINE</span>
+    <!-- SIDEBAR (EXACTLY 4 SECTIONS) -->
+    <aside class="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
+      <!-- Logo Header -->
+      <div class="h-16 flex items-center px-6 border-b border-slate-100 gap-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white font-display font-extrabold text-lg shadow-sm">
+          P
+        </div>
+        <div>
+          <div class="font-display font-bold text-slate-900 leading-tight flex items-center gap-1.5">
+            ProAffiliaters
+            <span class="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200">PRO</span>
           </div>
-          <div class="brand-subtitle">Telegram Automation & Drip</div>
+          <div class="text-[11px] text-slate-400 font-medium">Telegram Lead Engine</div>
         </div>
       </div>
 
-      <!-- Navigation Sections -->
-      <nav class="sidebar-menu">
-        <div class="menu-section-label">Core Pipeline</div>
-
-        <button class="nav-item active" data-tab="tab-leads" onclick="switchTab('tab-leads', this, 'Extracted Leads Directory')">
-          <div class="nav-item-left">
-            <span class="nav-icon">📋</span>
-            <span class="nav-label">Extracted Leads</span>
-          </div>
-          <span class="nav-badge" id="leads-sidebar-count">0</span>
+      <!-- Navigation Menu -->
+      <div class="p-3 text-[11px] font-bold text-slate-400 uppercase tracking-wider px-4 pt-4">Navigation</div>
+      <nav class="space-y-1 px-3 flex-1">
+        <!-- 1. Leads -->
+        <button id="nav-btn-leads" onclick="switchTab('tab-leads')" class="nav-item active w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-all">
+          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+          <span>Leads</span>
+          <span id="nav-leads-badge" class="ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">0</span>
         </button>
 
-        <button class="nav-item" data-tab="tab-accounts" onclick="switchTab('tab-accounts', this, 'Telegram Account Management')">
-          <div class="nav-item-left">
-            <span class="nav-icon">🔑</span>
-            <span class="nav-label">Telegram Accounts</span>
-          </div>
-          <span class="nav-badge" id="accounts-sidebar-count">0</span>
+        <!-- 2. Manual Sending -->
+        <button id="nav-btn-sending" onclick="switchTab('tab-sending')" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-all">
+          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+          <span>Manual Sending</span>
+          <span id="nav-sending-badge" class="ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Rotation</span>
         </button>
 
-        <button class="nav-item" data-tab="tab-drip-funnel" onclick="switchTab('tab-drip-funnel', this, '5-Week Progressive Drip Sequence')">
-          <div class="nav-item-left">
-            <span class="nav-icon">📆</span>
-            <span class="nav-label">5-Week Drip Funnel</span>
-          </div>
-          <span class="nav-badge badge-primary" id="drip-sidebar-count">5 Stages</span>
+        <!-- 3. Login Accounts -->
+        <button id="nav-btn-accounts" onclick="switchTab('tab-accounts')" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-all">
+          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+          <span>Login Accounts</span>
+          <span id="nav-accounts-badge" class="ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">0 Active</span>
         </button>
 
-        <button class="nav-item" data-tab="tab-keywords" onclick="switchTab('tab-keywords', this, 'Autonomous Telegram Keyword Search Engine')">
-          <div class="nav-item-left">
-            <span class="nav-icon">🔍</span>
-            <span class="nav-label">Keyword Search</span>
-          </div>
-          <span class="nav-badge" id="keywords-sidebar-count">0</span>
-        </button>
-
-        <div class="menu-section-label">Outreach & Campaigns</div>
-
-        <button class="nav-item" data-tab="tab-bot-outreach" onclick="switchTab('tab-bot-outreach', this, 'Telegram Bot Outreach Campaigns')">
-          <div class="nav-item-left">
-            <span class="nav-icon">🚀</span>
-            <span class="nav-label">Bot Outreach</span>
-          </div>
-          <span class="nav-badge" id="bot-outreach-sidebar-count">0</span>
-        </button>
-
-        <button class="nav-item" data-tab="tab-infobot" onclick="switchTab('tab-infobot', this, 'Official Info Bot & Broadcasts')">
-          <div class="nav-item-left">
-            <span class="nav-icon">🤖</span>
-            <span class="nav-label">Info Bot & Ads</span>
-          </div>
-          <span class="nav-badge" id="infobot-sidebar-count">0</span>
-        </button>
-
-        <div class="menu-section-label">Tools & System</div>
-
-        <button class="nav-item" data-tab="tab-playground" onclick="switchTab('tab-playground', this, 'Live Channel Bio Scanner')">
-          <div class="nav-item-left">
-            <span class="nav-icon">🧪</span>
-            <span class="nav-label">Bio Scanner</span>
-          </div>
-        </button>
-
-        <button class="nav-item" data-tab="tab-logs" onclick="switchTab('tab-logs', this, 'Real-time Activity & Sync Logs')">
-          <div class="nav-item-left">
-            <span class="nav-icon">⚡</span>
-            <span class="nav-label">Activity Logs</span>
-          </div>
-        </button>
-
-        <button class="nav-item" data-tab="tab-settings" onclick="switchTab('tab-settings', this, 'ProAffiliaters Integration Details')">
-          <div class="nav-item-left">
-            <span class="nav-icon">⚙️</span>
-            <span class="nav-label">Integration Specs</span>
-          </div>
+        <!-- 4. Automatic Sending Report -->
+        <button id="nav-btn-reports" onclick="switchTab('tab-reports')" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-all">
+          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+          <span>Sending Reports</span>
+          <span id="nav-reports-badge" class="ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">0</span>
         </button>
       </nav>
 
-      <!-- Sidebar Status Card -->
-      <div class="sidebar-status-card">
-        <div class="status-indicator-row">
-          <span class="pulse-dot"></span>
-          <span>30m Sync Active</span>
+      <!-- Sidebar Footer Status -->
+      <div class="p-4 border-t border-slate-100 text-xs space-y-2 bg-slate-50/50">
+        <div class="flex items-center gap-2 text-slate-600">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+          <span class="font-medium">30m Polling Active</span>
         </div>
-        <div class="status-api-name">API: app.proaffiliaters.com</div>
-        <div class="status-footer-row">
-          <span>Engine: Telethon MTProto</span>
-          <span class="status-tag">Connected</span>
-        </div>
-        <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--border-subtle); display:flex; justify-content:space-between; align-items:center;">
-          <span style="font-size:11px; color:var(--text-subtle); font-weight:600;" id="sidebar-user-email">spushkar812@gmail.com</span>
-          <a href="/logout" style="font-size:11px; color:var(--danger); text-decoration:none; font-weight:700;" title="Sign out of dashboard">Logout 🚪</a>
-        </div>
+        <div class="text-slate-400 text-[11px] truncate" id="sidebar-user-email">spushkar812@gmail.com</div>
+        <a href="/logout" class="block text-red-500 hover:text-red-600 font-medium text-[11px] pt-1">Sign Out &rarr;</a>
       </div>
     </aside>
 
-    <!-- MAIN APP WRAPPER -->
-    <div class="main-wrapper">
+    <!-- MAIN CONTENT WRAPPER -->
+    <main class="flex-1 flex flex-col min-w-0 overflow-y-auto">
 
-      <!-- Topbar Header -->
-      <header class="app-topbar">
-        <div class="topbar-left">
-          <button class="mobile-toggle-btn" onclick="toggleSidebar(true)" title="Toggle Navigation">
-            ☰
-          </button>
-          <div class="view-breadcrumb">
-            <span class="crumb-root">ProAffiliaters</span>
-            <span class="crumb-separator">/</span>
-            <span class="crumb-active" id="current-view-title">Extracted Leads Directory</span>
-          </div>
+      <!-- TOP BAR -->
+      <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-30">
+        <div>
+          <h1 id="header-breadcrumb" class="font-display font-bold text-lg text-slate-900">ProAffiliaters / Leads</h1>
         </div>
 
-        <div class="topbar-right">
-          <div class="pill-active">
-            <span class="pulse-dot"></span>
-            <span>Polling 30m Active</span>
+        <div class="flex items-center gap-3">
+          <div class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
+            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+            <span id="top-accounts-status">0 Sending Accounts Ready</span>
           </div>
-          <div style="display:flex; align-items:center; gap:8px; padding:5px 10px; background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:var(--radius-md); font-size:12px; font-weight:600; color:var(--text-main);">
-            <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:#10b981;"></span>
-            <span id="topbar-user-email">spushkar812@gmail.com</span>
-            <button onclick="handleDashboardLogout()" class="btn btn-sm btn-outline" style="padding:2px 7px; font-size:11px; color:var(--danger); border-color:#fecaca;" title="Sign out of dashboard">Logout</button>
-          </div>
-          <button class="btn btn-outline" id="btn-refresh" onclick="loadAll()">
-            🔄 Refresh
+
+          <button onclick="refreshCurrentTab()" title="Refresh" class="p-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 transition-all">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
           </button>
-          <button class="btn btn-primary" id="btn-sync-now" onclick="triggerManualSync()">
-            ⚡ Sync API Now
+
+          <button onclick="triggerSyncNow()" class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-xs font-semibold shadow-sm transition-all">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            <span>Sync API Now</span>
           </button>
         </div>
       </header>
 
-      <!-- Main Content Area -->
-      <main class="main-content">
+      <!-- CONTENT PANELS -->
+      <div class="p-8 max-w-7xl mx-auto w-full flex-1">
 
-        <!-- Top KPI Stat Cards -->
-        <section class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-card-header">
-              <span class="stat-title">Total Leads Extracted</span>
-              <div class="stat-icon" style="background:#e0e7ff; color:var(--primary);">🎯</div>
+        <!-- ========================================== -->
+        <!-- SECTION 1: LEADS TAB                       -->
+        <!-- ========================================== -->
+        <section id="tab-leads" class="tab-content space-y-6">
+          <!-- Header and Sub-tabs -->
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
+            <div>
+              <h2 class="text-2xl font-display font-bold text-slate-900">Leads Management</h2>
+              <p class="text-sm text-slate-500 mt-0.5">Segmented deal channel userbots and human admin usernames extracted from external deal sources.</p>
             </div>
-            <div class="stat-value" id="kpi-total">0</div>
-            <div class="stat-subtitle" id="kpi-storage">Saved directly in MongoDB</div>
-          </div>
 
-          <div class="stat-card">
-            <div class="stat-card-header">
-              <span class="stat-title">Human Owners / Managers</span>
-              <div class="stat-icon" style="background:var(--info-light); color:var(--info);">👤</div>
-            </div>
-            <div class="stat-value" id="kpi-users">0</div>
-            <div class="stat-subtitle">Direct @username contacts</div>
-          </div>
-
-          <div class="stat-card">
-            <div class="stat-card-header">
-              <span class="stat-title">Promotion / Deal Bots</span>
-              <div class="stat-icon" style="background:var(--purple-light); color:var(--purple);">🤖</div>
-            </div>
-            <div class="stat-value" id="kpi-bots">0</div>
-            <div class="stat-subtitle">Handles ending in "bot"</div>
-          </div>
-
-          <div class="stat-card">
-            <div class="stat-card-header">
-              <span class="stat-title">Polling Schedule</span>
-              <div class="stat-icon" style="background:var(--success-light); color:var(--success);">⏰</div>
-            </div>
-            <div class="stat-value" style="font-size:24px; padding-top:4px;" id="kpi-interval">30 Mins</div>
-            <div class="stat-subtitle" id="kpi-api-status">API: app.proaffiliaters.com</div>
-          </div>
-        </section>
-
-    <!-- VIEW 1: Leads Directory -->
-    <div id="tab-leads" class="view-content active">
-      
-      <!-- Filter and Search Bar -->
-      <div class="filter-bar">
-        <div class="filter-left">
-          <div class="search-box">
-            <span class="search-icon">🔍</span>
-            <input type="text" id="search-input" placeholder="Search by handle, channel, or bio text..." oninput="filterLeads()" />
-          </div>
-
-          <div class="type-pills">
-            <button class="type-pill-btn active" data-type="all" onclick="setTypeFilter('all', this)">All</button>
-            <button class="type-pill-btn" data-type="user" onclick="setTypeFilter('user', this)">👤 Users</button>
-            <button class="type-pill-btn" data-type="bot" onclick="setTypeFilter('bot', this)">🤖 Bots</button>
-          </div>
-        </div>
-
-        <div style="display:flex; gap:10px; align-items:center;">
-          <select id="status-select" class="select-status" onchange="filterLeads()">
-            <option value="all">All Outreach Statuses</option>
-            <option value="new">Status: New</option>
-            <option value="contacted">Status: Contacted</option>
-            <option value="converted">Status: Converted</option>
-            <option value="ignored">Status: Ignored</option>
-          </select>
-
-          <button class="btn btn-outline" onclick="exportCSV()">
-            📥 Export CSV
-          </button>
-        </div>
-      </div>
-
-      <!-- Leads Table -->
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Lead Handle</th>
-              <th>Lead Type</th>
-              <th>Status</th>
-              <th>Extracted From Channel</th>
-              <th>Bio / Context Snippet</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody id="leads-tbody">
-            <!-- Dynamically populated -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- VIEW: Official Info Bot & Broadcasts Console -->
-    <div id="tab-infobot" class="view-content">
-      
-      <!-- Info Bot Header Banner -->
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-lg); padding:20px 24px; margin-bottom:20px; box-shadow:var(--shadow-sm); display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:16px;">
-        <div style="display:flex; align-items:center; gap:16px;">
-          <div style="width:48px; height:48px; border-radius:14px; background:linear-gradient(135deg, #0284c7 0%, #38bdf8 100%); color:white; display:flex; align-items:center; justify-content:center; font-size:24px; box-shadow:0 4px 12px rgba(2, 132, 199, 0.3);">
-            🤖
-          </div>
-          <div>
-            <div style="display:flex; align-items:center; gap:10px;">
-              <h2 style="font-size:18px; font-weight:700; color:var(--text-main);" id="infobot-handle-display">@ProaffiliatersInfoBot</h2>
-              <span class="pill-active" id="infobot-status-badge">
-                <span class="pulse-dot"></span>
-                <span id="infobot-status-text">Online & Polling</span>
-              </span>
-            </div>
-            <p style="font-size:12px; color:var(--text-subtle); margin-top:2px;">
-              Official ProAffiliaters Ad Landing & Lead Capture Bot • Admin Console ID: <code>7573032265</code>
-            </p>
-          </div>
-        </div>
-
-        <div style="display:flex; gap:10px; align-items:center;">
-          <a id="infobot-deeplink-btn" href="https://t.me/ProaffiliatersInfoBot" target="_blank" class="btn btn-primary" style="text-decoration:none;">
-            🚀 Open Bot in Telegram
-          </a>
-          <button class="btn btn-outline" onclick="loadInfoBotData()">
-            🔄 Refresh Leads
-          </button>
-        </div>
-      </div>
-
-      <!-- Info Bot KPI Metrics Grid -->
-      <div class="stats-grid" style="margin-bottom:20px;">
-        <div class="stat-card">
-          <div class="stat-card-header">
-            <span class="stat-title">Captured Info Bot Leads</span>
-            <div class="stat-icon" style="background:#e0f2fe; color:#0284c7;">👥</div>
-          </div>
-          <div class="stat-value" id="infobot-kpi-leads">0</div>
-          <div class="stat-subtitle">Registered via /start & Telegram ads</div>
-        </div>
-
-        <div class="stat-card">
-          <div class="stat-card-header">
-            <span class="stat-title">Active in Last 24h</span>
-            <div class="stat-icon" style="background:#d1fae5; color:#059669;">⚡</div>
-          </div>
-          <div class="stat-value" id="infobot-kpi-active">0</div>
-          <div class="stat-subtitle">Recently engaged users</div>
-        </div>
-
-        <div class="stat-card">
-          <div class="stat-card-header">
-            <span class="stat-title">Blocked / Inactive</span>
-            <div class="stat-icon" style="background:#fee2e2; color:#dc2626;">🚫</div>
-          </div>
-          <div class="stat-value" id="infobot-kpi-blocked">0</div>
-          <div class="stat-subtitle">Auto-skipped during broadcasts</div>
-        </div>
-
-        <div class="stat-card">
-          <div class="stat-card-header">
-            <span class="stat-title">Broadcasts Dispatched</span>
-            <div class="stat-icon" style="background:#ede9fe; color:#7c3aed;">📢</div>
-          </div>
-          <div class="stat-value" id="infobot-kpi-broadcasts">0</div>
-          <div class="stat-subtitle">Total announcement campaigns sent</div>
-        </div>
-      </div>
-
-      <!-- Two-Column Layout: Broadcast Composer & Leads Directory -->
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(440px, 1fr)); gap:20px; margin-bottom:24px;">
-        
-        <!-- Broadcast Composer Panel -->
-        <div class="scanner-card" style="margin:0;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-            <h3 style="font-size:16px; font-weight:700; color:var(--text-main);">📢 Web Broadcast Dispatcher</h3>
-            <span style="font-size:11px; padding:3px 8px; border-radius:6px; background:var(--bg-card-subtle); color:var(--text-subtle);">Admin Only</span>
-          </div>
-          <p style="font-size:12px; color:var(--text-subtle); margin-bottom:16px;">
-            Instantly dispatch announcements to all registered active leads. Supports HTML tags (<code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;code&gt;</code>).
-          </p>
-
-          <div class="form-group">
-            <label>Broadcast Message Text *</label>
-            <textarea id="broadcast-message-text" class="form-textarea" rows="4" placeholder="✨ Special Announcement for ProAffiliaters Creators!&#10;&#10;New feature released: Swapping Amazon tags in seconds.&#10;Tap below to try it out!"></textarea>
-          </div>
-
-          <div class="form-group">
-            <label>Optional Photo Image URL / Telegram File ID</label>
-            <input type="text" id="broadcast-photo-url" class="form-input" placeholder="https://example.com/banner.jpg (or leave blank)" />
-          </div>
-
-          <div class="form-group">
-            <label>Interactive Inline Buttons Markup</label>
-            <input type="text" id="broadcast-buttons-markup" class="form-input" placeholder="[🔥 Open Web App | https://app.proaffiliaters.com] [📢 Join Channel | https://t.me/proaffiliaters]" />
-            <p style="font-size:11px; color:var(--text-subtle); margin-top:4px;">
-              Syntax format: <code>[Button Title | https://link]</code>. Multiple buttons allowed; automatically formatted in rows.
-            </p>
-          </div>
-
-          <button class="btn btn-primary" id="btn-send-broadcast" onclick="sendInfoBotBroadcast()" style="width:100%;">
-            🚀 Dispatch Broadcast to All Leads
-          </button>
-        </div>
-
-        <!-- Registered Info Bot Leads Panel -->
-        <div class="scanner-card" style="margin:0; display:flex; flex-direction:column;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-            <h3 style="font-size:16px; font-weight:700; color:var(--text-main);">👥 Captured User Leads</h3>
-            <span style="font-size:12px; font-weight:600; color:var(--primary);" id="infobot-leads-count-label">0 Leads</span>
-          </div>
-          
-          <div style="margin-bottom:12px;">
-            <input type="text" id="infobot-lead-search" class="form-input" placeholder="Search by handle, name, ID, or campaign tag..." oninput="filterInfoBotUsers()" />
-          </div>
-
-          <div class="table-container" style="flex:1; max-height:360px; overflow-y:auto; border:1px solid var(--border-subtle); border-radius:var(--radius-md);">
-            <table style="width:100%; border-collapse:collapse; font-size:12px;">
-              <thead>
-                <tr style="background:var(--bg-card-subtle);">
-                  <th style="padding:8px 12px; text-align:left;">User</th>
-                  <th style="padding:8px 12px; text-align:left;">Chat ID</th>
-                  <th style="padding:8px 12px; text-align:left;">Campaign Tag</th>
-                  <th style="padding:8px 12px; text-align:left;">Joined</th>
-                  <th style="padding:8px 12px; text-align:left;">Status</th>
-                </tr>
-              </thead>
-              <tbody id="infobot-leads-tbody">
-                <!-- Dynamically populated -->
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- Broadcast Audit Trail / History -->
-      <div class="scanner-card" style="margin:0;">
-        <h3 style="font-size:16px; font-weight:700; color:var(--text-main); margin-bottom:6px;">📜 Recent Broadcast Audit Trail</h3>
-        <p style="font-size:12px; color:var(--text-subtle); margin-bottom:16px;">
-          Delivery metrics and delivery logs for all campaigns dispatched through @ProaffiliatersInfoBot.
-        </p>
-
-        <div class="table-container" style="border:1px solid var(--border-subtle); border-radius:var(--radius-md);">
-          <table style="width:100%; border-collapse:collapse; font-size:12px;">
-            <thead>
-              <tr style="background:var(--bg-card-subtle);">
-                <th style="padding:10px 14px; text-align:left;">Dispatched Date</th>
-                <th style="padding:10px 14px; text-align:left;">Message Content</th>
-                <th style="padding:10px 14px; text-align:center;">Buttons</th>
-                <th style="padding:10px 14px; text-align:center;">Targeted</th>
-                <th style="padding:10px 14px; text-align:center;">Delivered</th>
-                <th style="padding:10px 14px; text-align:center;">Failed / Blocked</th>
-              </tr>
-            </thead>
-            <tbody id="infobot-broadcasts-tbody">
-              <!-- Dynamically populated -->
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-    </div>
-
-    <!-- VIEW: Admin Bot Outreach Console -->
-    <div id="tab-bot-outreach" class="view-content">
-      
-      <!-- Header Banner -->
-      <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-lg); padding:20px 24px; margin-bottom:20px; box-shadow:var(--shadow-sm); display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:16px;">
-        <div style="display:flex; align-items:center; gap:16px;">
-          <div style="width:48px; height:48px; border-radius:14px; background:linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color:white; display:flex; align-items:center; justify-content:center; font-size:24px; box-shadow:0 4px 12px rgba(79, 70, 229, 0.3);">
-            🚀
-          </div>
-          <div>
-            <div style="display:flex; align-items:center; gap:10px;">
-              <h2 style="font-size:18px; font-weight:700; color:var(--text-main);">Admin Bot Outreach Engine</h2>
-              <span class="pill-active" id="forwarder-telethon-badge">
-                <span class="pulse-dot"></span>
-                <span id="forwarder-telethon-text">Telethon Ready</span>
-              </span>
-            </div>
-            <p style="font-size:12px; color:var(--text-subtle); margin-top:2px;">
-              Forwards promotional channel posts to deal channel contact bots with full banners & clickable inline deep-link buttons.
-            </p>
-          </div>
-        </div>
-
-        <div style="display:flex; gap:10px; align-items:center;">
-          <a id="channel-link-btn" href="https://t.me/pro_affiliaters" target="_blank" class="btn btn-outline" style="text-decoration:none;">
-            📢 View @pro_affiliaters
-          </a>
-          <button class="btn btn-primary" onclick="publishAllPostsToChannel()" id="btn-publish-all">
-            ⚡ Publish All 5 Posts to Channel
-          </button>
-        </div>
-      </div>
-
-      <!-- Section: 5 Staged Channel Posts Cards -->
-      <div style="margin-bottom:24px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
-          <div>
-            <h3 style="font-size:16px; font-weight:700; color:var(--text-main);">📁 5 Promotional Posts (Banners + Text + Deep-link Buttons)</h3>
-            <p style="font-size:12px; color:var(--text-subtle);">Publish posts once to your channel. Clickable buttons deep-link directly to @ProaffiliatersInfoBot to capture leads!</p>
-          </div>
-          <button class="btn btn-outline" onclick="loadBotOutreachData()" style="padding:6px 12px; font-size:12px;">
-            🔄 Refresh Posts Status
-          </button>
-        </div>
-
-        <div id="promo-posts-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px;">
-          <!-- Dynamically populated promo post cards -->
-        </div>
-      </div>
-
-      <!-- Section: Outreach Dispatcher & Live Forwarder Monitor -->
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(440px, 1fr)); gap:20px; margin-bottom:24px;">
-        
-        <!-- Outreach Configuration Card -->
-        <div class="scanner-card" style="margin:0;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-            <h3 style="font-size:16px; font-weight:700; color:var(--text-main);">🎯 Bot Forwarder Dispatcher</h3>
-            <span style="font-size:11px; padding:3px 8px; border-radius:6px; background:var(--primary-light); color:var(--primary); font-weight:600;" id="outreach-pending-bots-badge">0 Pending Bots</span>
-          </div>
-          <p style="font-size:12px; color:var(--text-subtle); margin-bottom:16px;">
-            Select a published post to forward to channel contact bots from your MongoDB leads.
-          </p>
-
-          <div class="form-group">
-            <label>Select Promo Post to Forward *</label>
-            <select id="campaign-post-select" class="form-input" onchange="onCampaignPostSelected()">
-              <option value="1">Post 1: Automate Your Telegram Deal Channels</option>
-              <option value="2">Post 2: 24/7 Hands-Free AutoPilot</option>
-              <option value="3">Post 3: Custom Templates & Visual Branding</option>
-              <option value="4">Post 4: Multi-Template Engine & Rotation</option>
-              <option value="5">Post 5: 1-Click Quick Post & Auto-Delete</option>
-            </select>
-          </div>
-
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-            <div class="form-group">
-              <label>Pacing Delay (Seconds)</label>
-              <input type="number" id="campaign-delay" class="form-input" value="8" min="4" max="60" />
-            </div>
-            <div class="form-group">
-              <label>Target Limit (Max Bots)</label>
-              <input type="number" id="campaign-limit" class="form-input" value="50" min="1" max="500" />
-            </div>
-          </div>
-
-          <!-- Single Bot Test Box -->
-          <div style="background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:12px 14px; margin-bottom:16px;">
-            <label style="font-size:12px; font-weight:700; color:var(--text-main); display:block; margin-bottom:6px;">🧪 Single Bot Test (Dry Run)</label>
-            <div style="display:flex; gap:8px;">
-              <input type="text" id="test-single-bot-input" class="form-input" placeholder="e.g. @MyDealSubmitBot" style="font-size:12px; padding:8px 10px;" />
-              <button class="btn btn-outline" onclick="testForwardSingleBot()" id="btn-test-forward" style="padding:8px 14px; font-size:12px; white-space:nowrap;">
-                Forward Test
+            <!-- Sub-tabs: Userbots vs Usernames -->
+            <div class="inline-flex p-1 bg-slate-100 rounded-xl border border-slate-200">
+              <button id="subtab-btn-userbots" onclick="switchLeadSubTab('bot')" class="px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white shadow-sm transition-all flex items-center gap-2">
+                <span>🤖 Userbots</span>
+                <span id="badge-count-userbots" class="text-xs px-2 py-0.5 rounded-full bg-white/20 text-white font-bold">0</span>
+              </button>
+              <button id="subtab-btn-usernames" onclick="switchLeadSubTab('user')" class="px-4 py-2 text-sm font-medium rounded-lg text-slate-600 hover:bg-slate-200 transition-all flex items-center gap-2">
+                <span>👤 Usernames</span>
+                <span id="badge-count-usernames" class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold">0</span>
               </button>
             </div>
           </div>
 
-          <button class="btn btn-primary" onclick="startBotCampaign()" id="btn-start-campaign" style="width:100%; justify-content:center; padding:12px; font-size:14px;">
-            🚀 Launch Bot Outreach Campaign
-          </button>
-        </div>
-
-        <!-- Live Campaign Monitor & Real-Time Log Viewer -->
-        <div class="scanner-card" style="margin:0; display:flex; flex-direction:column;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-            <h3 style="font-size:16px; font-weight:700; color:var(--text-main);">📡 Live Campaign Monitor</h3>
-            <span id="campaign-state-pill" style="font-size:11px; font-weight:700; padding:3px 10px; border-radius:9999px; background:var(--bg-card-subtle); color:var(--text-subtle);">
-              IDLE
-            </span>
-          </div>
-
-          <!-- Progress Bar -->
-          <div style="margin-bottom:16px;">
-            <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:6px; color:var(--text-subtle);">
-              <span>Progress: <strong id="campaign-progress-pct" style="color:var(--text-main);">0%</strong></span>
-              <span><span id="campaign-sent-count" style="color:var(--success); font-weight:700;">0</span> / <span id="campaign-total-count">0</span> Delivered</span>
+          <!-- Quick Stats Cards -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
+              <div class="w-12 h-12 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xl">🤖</div>
+              <div>
+                <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Userbots</div>
+                <div id="leads-stat-userbots" class="text-2xl font-display font-extrabold text-slate-900">0</div>
+                <div class="text-[11px] text-slate-400">Automated deal forwarding bots</div>
+              </div>
             </div>
-            <div style="height:10px; background:var(--bg-card-subtle); border-radius:9999px; overflow:hidden; border:1px solid var(--border-subtle);">
-              <div id="campaign-progress-bar" style="height:100%; width:0%; background:linear-gradient(90deg, #4f46e5, #06b6d4); transition:width 0.3s ease;"></div>
+
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
+              <div class="w-12 h-12 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center font-bold text-xl">👤</div>
+              <div>
+                <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Usernames</div>
+                <div id="leads-stat-usernames" class="text-2xl font-display font-extrabold text-slate-900">0</div>
+                <div class="text-[11px] text-slate-400">Channel admins & business managers</div>
+              </div>
             </div>
-          </div>
 
-          <!-- Pacing & Current Target -->
-          <div style="display:flex; justify-content:space-between; align-items:center; background:var(--bg-card-subtle); padding:8px 12px; border-radius:var(--radius-sm); font-size:12px; margin-bottom:12px;">
-            <span>Current Target: <strong id="campaign-current-bot" style="color:var(--primary);">None</strong></span>
-            <span>Failed/Blocked: <strong id="campaign-failed-count" style="color:#dc2626;">0</strong></span>
-          </div>
-
-          <!-- Controls -->
-          <div style="display:flex; gap:8px; margin-bottom:14px;">
-            <button class="btn btn-outline" onclick="controlCampaign('pause')" id="btn-pause-camp" style="flex:1; justify-content:center; padding:8px;" disabled>
-              ⏸️ Pause
-            </button>
-            <button class="btn btn-outline" onclick="controlCampaign('resume')" id="btn-resume-camp" style="flex:1; justify-content:center; padding:8px;" disabled>
-              ▶️ Resume
-            </button>
-            <button class="btn btn-outline" onclick="controlCampaign('stop')" id="btn-stop-camp" style="flex:1; justify-content:center; padding:8px; color:#dc2626; border-color:#fca5a5;" disabled>
-              ⏹️ Stop
-            </button>
-          </div>
-
-          <!-- Terminal Log Box -->
-          <div style="flex:1; min-height:160px; max-height:220px; background:#0f172a; border-radius:var(--radius-md); padding:10px 14px; font-family:monospace; font-size:11px; color:#94a3b8; overflow-y:auto; line-height:1.6;" id="campaign-terminal-logs">
-            <div style="color:#64748b;">// Bot forwarder logs will appear here in real-time...</div>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- Section: Past Campaigns History -->
-      <div class="scanner-card">
-        <h3 style="font-size:16px; font-weight:700; color:var(--text-main); margin-bottom:14px;">📜 Bot Outreach Campaign Audit</h3>
-        <div style="overflow-x:auto;">
-          <table style="width:100%; border-collapse:collapse; font-size:12px;">
-            <thead>
-              <tr style="background:var(--bg-card-subtle); text-align:left; border-bottom:1px solid var(--border-subtle); color:var(--text-subtle);">
-                <th style="padding:10px 14px;">Date & Time</th>
-                <th style="padding:10px 14px;">Post #</th>
-                <th style="padding:10px 14px;">Channel Msg</th>
-                <th style="padding:10px 14px; text-align:center;">Targeted</th>
-                <th style="padding:10px 14px; text-align:center;">Delivered</th>
-                <th style="padding:10px 14px; text-align:center;">Failed</th>
-                <th style="padding:10px 14px; text-align:center;">Status</th>
-              </tr>
-            </thead>
-            <tbody id="bot-campaigns-tbody">
-              <!-- Dynamically populated -->
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-    </div>
-
-    <!-- VIEW: Telegram Multi-Account Manager -->
-    <div id="tab-accounts" class="view-content">
-      <div class="scanner-card" style="margin-bottom:20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
-        <div>
-          <h2 style="font-size:18px; font-weight:700; color:var(--text-main); margin-bottom:4px;">🔑 Telegram Account Management</h2>
-          <p style="font-size:13px; color:var(--text-subtle);">
-            Connect unlimited Telegram accounts. Assign accounts to <strong>Slots 1 to 5</strong> for weekly rotating drip campaigns to deal contact bots.
-          </p>
-        </div>
-        <div style="display:flex; gap:10px; align-items:center;">
-          <button class="btn btn-outline" style="font-size:12px; color:#64748b;" onclick="clearDemoAccounts()" title="Clear mock demo accounts">
-            🧹 Clear Demo Accounts
-          </button>
-          <button class="btn btn-primary" onclick="openAddAccountModal()">
-            ➕ Connect New Account
-          </button>
-        </div>
-      </div>
-
-      <!-- Telegram API Config Banner (shown if not configured) -->
-      <div id="telegram-config-banner" style="display:none; background:#fffbeb; border:1px solid #fde68a; border-radius:var(--radius-lg); padding:20px; margin-bottom:20px;">
-        <div style="display:flex; gap:14px; align-items:flex-start;">
-          <div style="font-size:26px;">⚠️</div>
-          <div style="flex:1;">
-            <h3 style="font-size:15px; font-weight:700; color:#92400e; margin-bottom:4px;">Telegram MTProto API Credentials Required</h3>
-            <p style="font-size:13px; color:#b45309; line-height:1.5; margin-bottom:12px;">
-              To connect real Telegram accounts and receive login OTPs, you need a free <strong>API ID</strong> and <strong>API HASH</strong> from Telegram.<br/>
-              <strong>Quick 1-minute setup:</strong><br/>
-              1. Open <a href="https://my.telegram.org" target="_blank" style="color:#d97706; font-weight:700; text-decoration:underline;">my.telegram.org</a> in your browser.<br/>
-              2. Log in with your phone number and enter the confirmation code Telegram sends you.<br/>
-              3. Click <strong>API development tools</strong> and create an app (name can be <code>ProAffTool</code>).<br/>
-              4. Copy your <code>api_id</code> and <code>api_hash</code> and paste them below:
-            </p>
-            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-              <input type="number" id="cfg-api-id" class="form-input" placeholder="API ID (e.g. 12345678)" style="width:200px; padding:8px 12px;" />
-              <input type="text" id="cfg-api-hash" class="form-input" placeholder="API HASH (32 hex characters)" style="width:320px; padding:8px 12px;" />
-              <button class="btn btn-primary" onclick="saveTelegramConfig()" style="padding:8px 18px;">💾 Save & Activate</button>
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
+              <div class="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold text-xl">✅</div>
+              <div>
+                <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Contacted Leads</div>
+                <div id="leads-stat-contacted" class="text-2xl font-display font-extrabold text-slate-900">0</div>
+                <div class="text-[11px] text-slate-400">Reached via promotional messages</div>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
 
-      <!-- Account Slots Grid (Slot 1 to 5) -->
-      <div id="accounts-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:18px; margin-bottom:24px;">
-        <!-- Populated dynamically by loadAccounts() -->
-      </div>
-    </div>
+          <!-- Controls Bar -->
+          <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+            <div class="flex flex-1 items-center gap-3">
+              <!-- Search -->
+              <div class="relative flex-1 max-w-md">
+                <svg class="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                <input id="leads-search-input" oninput="debounceLeadsSearch()" type="text" placeholder="Search by @username or channel source..." class="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all">
+              </div>
 
-    <!-- VIEW: 5-Week Drip Funnel -->
-    <div id="tab-drip-funnel" class="view-content">
-      <div class="scanner-card" style="margin-bottom:20px;">
-        <h2 style="font-size:18px; font-weight:700; color:var(--text-main); margin-bottom:4px;">📆 5-Week Progressive Drip Forwarding Sequence</h2>
-        <p style="font-size:13px; color:var(--text-subtle);">
-          Progressive weekly forward sequence to contact bots. Each post is forwarded from <code>@pro_affiliaters</code> using that week's dedicated account, enforcing a <strong>7-day cooldown</strong> between drops.
-        </p>
+              <!-- Status Filter -->
+              <select id="leads-status-select" onchange="loadLeads()" class="py-2 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="all">All Outreach Statuses</option>
+                <option value="pending">Pending</option>
+                <option value="contacted">Contacted</option>
+                <option value="replied">Replied</option>
+                <option value="converted">Converted</option>
+                <option value="ignored">Ignored</option>
+              </select>
+            </div>
 
-        <!-- Funnel Metric Chips -->
-        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px; margin-top:18px;" id="drip-kpi-grid">
-          <div style="background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:12px 14px;">
-            <div style="font-size:11px; font-weight:700; color:var(--text-subtle); text-transform:uppercase;">Total Deal Bots</div>
-            <div style="font-size:22px; font-weight:800; color:var(--text-main); margin-top:2px;" id="funnel-total-bots">0</div>
-          </div>
-          <div style="background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:12px 14px;">
-            <div style="font-size:11px; font-weight:700; color:var(--text-subtle); text-transform:uppercase;">Pending Week 1</div>
-            <div style="font-size:22px; font-weight:800; color:var(--primary); margin-top:2px;" id="funnel-pending-w1">0</div>
-          </div>
-          <div style="background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:12px 14px;">
-            <div style="font-size:11px; font-weight:700; color:var(--text-subtle); text-transform:uppercase;">Week 1 Sent</div>
-            <div style="font-size:22px; font-weight:800; color:var(--info); margin-top:2px;" id="funnel-stage1-sent">0</div>
-          </div>
-          <div style="background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:12px 14px;">
-            <div style="font-size:11px; font-weight:700; color:var(--text-subtle); text-transform:uppercase;">Week 2 Sent</div>
-            <div style="font-size:22px; font-weight:800; color:var(--info); margin-top:2px;" id="funnel-stage2-sent">0</div>
-          </div>
-          <div style="background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:12px 14px;">
-            <div style="font-size:11px; font-weight:700; color:var(--text-subtle); text-transform:uppercase;">Week 3 Sent</div>
-            <div style="font-size:22px; font-weight:800; color:var(--info); margin-top:2px;" id="funnel-stage3-sent">0</div>
-          </div>
-          <div style="background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:var(--radius-md); padding:12px 14px;">
-            <div style="font-size:11px; font-weight:700; color:var(--text-subtle); text-transform:uppercase;">Week 4 Sent</div>
-            <div style="font-size:22px; font-weight:800; color:var(--info); margin-top:2px;" id="funnel-stage4-sent">0</div>
-          </div>
-          <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:var(--radius-md); padding:12px 14px;">
-            <div style="font-size:11px; font-weight:700; color:#15803d; text-transform:uppercase;">Stage 5 Completed</div>
-            <div style="font-size:22px; font-weight:800; color:#15803d; margin-top:2px;" id="funnel-stage5-completed">0</div>
-          </div>
-        </div>
-      </div>
+            <div class="flex items-center gap-2.5">
+              <button onclick="openAddLeadModal()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm transition-all">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                <span>Add Lead</span>
+              </button>
 
-      <!-- 5 Weekly Stage Cards -->
-      <div style="display:flex; flex-direction:column; gap:16px; margin-bottom:24px;" id="drip-stages-container">
-        <!-- Rendered dynamically by loadDripOverview() -->
-      </div>
-    </div>
-
-    <!-- VIEW: Autonomous Telegram Keyword Search System -->
-    <div id="tab-keywords" class="view-content">
-      
-      <!-- Top Action Bar & Status Banner -->
-      <div class="scanner-card" style="margin-bottom:20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
-        <div>
-          <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
-            <h2 style="font-size:20px; font-weight:800; color:var(--text-main); margin:0;">🔍 Autonomous Telegram Keyword Search</h2>
-            <span class="status-chip chip-active" id="autonomous-engine-badge">🟢 30m Auto-Cycle Active (Boot + Every 30m)</span>
+              <button onclick="exportLeadsCsv()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-all">
+                <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                <span>Export CSV</span>
+              </button>
+            </div>
           </div>
-          <p style="font-size:13px; color:var(--text-subtle); margin:0;">
-            Autonomously discovers public Telegram deal channels matching keywords, inspects bios, and extracts deal owner handles & submission bots into MongoDB.
-          </p>
-        </div>
-        <div style="display:flex; gap:10px;">
-          <button class="btn btn-outline" onclick="openAddKeywordModal()">
-            ➕ Add Keyword
-          </button>
-          <button class="btn btn-primary" onclick="runAutonomousCycleNow()" id="btn-run-auto-cycle">
-            ⚡ Run Auto-Cycle Now
-          </button>
-        </div>
-      </div>
 
-      <!-- KPI Stat Cards -->
-      <div class="stats-grid" style="margin-bottom:20px;">
-        <div class="stat-card">
-          <div class="stat-icon-wrapper icon-users">🎯</div>
-          <div class="stat-info">
-            <div class="stat-value" id="kw-active-count">0</div>
-            <div class="stat-label">Active Keywords</div>
-            <div class="stat-sub" id="kw-total-count">0 configured targets</div>
+          <!-- Leads Data Table -->
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left text-sm">
+                <thead class="bg-slate-50/75 border-b border-slate-200 text-slate-500 uppercase text-[11px] font-semibold tracking-wider">
+                  <tr>
+                    <th class="py-3.5 px-6">Lead Handle</th>
+                    <th class="py-3.5 px-4">Classification</th>
+                    <th class="py-3.5 px-4">Discovered Source</th>
+                    <th class="py-3.5 px-4">Outreach Status</th>
+                    <th class="py-3.5 px-4">Discovered Date</th>
+                    <th class="py-3.5 px-6 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="leads-table-body" class="divide-y divide-slate-100">
+                  <tr>
+                    <td colspan="6" class="py-12 text-center text-slate-400">Loading leads data...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Table Footer -->
+            <div class="p-4 bg-slate-50/50 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+              <div id="leads-pagination-info">Showing 0 leads</div>
+              <div class="flex gap-2">
+                <button onclick="prevLeadsPage()" id="btn-leads-prev" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white font-medium hover:bg-slate-50 disabled:opacity-50">Previous</button>
+                <button onclick="nextLeadsPage()" id="btn-leads-next" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white font-medium hover:bg-slate-50 disabled:opacity-50">Next</button>
+              </div>
+            </div>
           </div>
-        </div>
+        </section>
 
-        <div class="stat-card">
-          <div class="stat-icon-wrapper icon-bots">📡</div>
-          <div class="stat-info">
-            <div class="stat-value" id="kw-channels-count">0</div>
-            <div class="stat-label">Channels Discovered</div>
-            <div class="stat-sub">Saved in database</div>
+
+        <!-- ========================================== -->
+        <!-- SECTION 2: MANUAL SENDING TAB              -->
+        <!-- ========================================== -->
+        <section id="tab-sending" class="tab-content hidden space-y-6">
+          <div class="pb-2 border-b border-slate-200">
+            <h2 class="text-2xl font-display font-bold text-slate-900">Manual Promotional Sending</h2>
+            <p class="text-sm text-slate-500 mt-0.5">Compose promotional messages and dispatch to leads with automatic multi-account round-robin rotation and flood-wait protection.</p>
           </div>
-        </div>
 
-        <div class="stat-card">
-          <div class="stat-icon-wrapper icon-total">👥</div>
-          <div class="stat-info">
-            <div class="stat-value" id="kw-leads-count">0</div>
-            <div class="stat-label">Leads Extracted</div>
-            <div class="stat-sub">Direct @user & @bot contacts</div>
+          <!-- Two Column Composer & Config Layout -->
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+            <!-- LEFT: POST COMPOSER (7 COLS) -->
+            <div class="lg:col-span-7 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
+              <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+                <h3 class="font-display font-bold text-slate-900 flex items-center gap-2">
+                  <span>✍️ Compose Promotional Post</span>
+                </h3>
+                <!-- Saved Templates Dropdown -->
+                <div class="flex items-center gap-2">
+                  <select id="composer-template-select" onchange="onTemplateSelected()" class="text-xs py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-lg text-slate-700 font-medium focus:ring-1 focus:ring-blue-500">
+                    <option value="">-- Load Saved Template --</option>
+                  </select>
+                  <button onclick="deleteSelectedTemplate()" title="Delete Template" class="p-1.5 text-slate-400 hover:text-red-500 rounded-lg border border-slate-200 hover:bg-slate-50">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Post Title -->
+              <div>
+                <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Post Title / Campaign Name</label>
+                <input id="post-title" type="text" placeholder="e.g. ProAffiliaters Exclusive Deal Promotion" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all">
+              </div>
+
+              <!-- Promotional Message Textarea -->
+              <div>
+                <div class="flex items-center justify-between mb-1.5">
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider">Promotional Message Content</label>
+                  <span class="text-[11px] text-slate-400">Telegram Markdown (*bold*, _italic_, [link](url))</span>
+                </div>
+                <textarea id="post-message-text" rows="7" placeholder="Write your compelling promotional offer message here...&#10;&#10;🔥 *Exclusive Deal:* Join India's #1 Affiliate Network!&#10;👉 Highest commissions & instant daily payouts.&#10;Click the link below to get started!" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"></textarea>
+              </div>
+
+              <!-- Image URL & Preview -->
+              <div>
+                <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Image / Banner URL (Optional)</label>
+                <input id="post-image-url" oninput="updateImagePreview()" type="url" placeholder="https://example.com/banner.jpg" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all">
+                <div id="image-preview-container" class="hidden mt-3 p-2 bg-slate-50 border border-slate-200 rounded-xl max-w-xs">
+                  <img id="image-preview-img" src="" alt="Post Preview" class="rounded-lg max-h-40 w-auto object-cover">
+                </div>
+              </div>
+
+              <!-- Inline Button Options -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Button Text (Optional)</label>
+                  <input id="post-button-text" type="text" placeholder="e.g. 🚀 Join VIP Deals Group" class="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Button Target Link (Optional)</label>
+                  <input id="post-button-url" type="url" placeholder="e.g. https://t.me/proaffiliaters" class="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+              </div>
+
+              <!-- Save Template Button -->
+              <div class="pt-2 flex justify-end">
+                <button onclick="savePostTemplate()" class="flex items-center gap-2 px-4 py-2 rounded-xl border border-blue-600 text-blue-600 hover:bg-blue-50 font-semibold text-xs transition-all">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>
+                  <span>Save as Post Template</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- RIGHT: DISPATCH & ACCOUNT ROTATION CONFIG (5 COLS) -->
+            <div class="lg:col-span-5 space-y-6">
+
+              <!-- Target Audience Box -->
+              <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                <h3 class="font-display font-bold text-slate-900 flex items-center gap-2">
+                  <span>🎯 Target Audience Selection</span>
+                </h3>
+
+                <div class="space-y-2.5">
+                  <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 cursor-pointer transition-all">
+                    <input type="radio" name="sending-target" value="all_userbots" checked onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                    <div class="flex-1">
+                      <div class="text-sm font-semibold text-slate-800">All Userbots</div>
+                      <div class="text-xs text-slate-500">Sends to all automated deal bots (<span id="target-count-userbots">0</span> ready)</div>
+                    </div>
+                  </label>
+
+                  <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 cursor-pointer transition-all">
+                    <input type="radio" name="sending-target" value="all_usernames" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                    <div class="flex-1">
+                      <div class="text-sm font-semibold text-slate-800">All Usernames</div>
+                      <div class="text-xs text-slate-500">Sends to human channel owners (<span id="target-count-usernames">0</span> ready)</div>
+                    </div>
+                  </label>
+
+                  <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 cursor-pointer transition-all">
+                    <input type="radio" name="sending-target" value="uncontacted" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                    <div class="flex-1">
+                      <div class="text-sm font-semibold text-slate-800">Uncontacted Leads Only</div>
+                      <div class="text-xs text-slate-500">Avoids leads already contacted (<span id="target-count-uncontacted">0</span> ready)</div>
+                    </div>
+                  </label>
+
+                  <label class="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 cursor-pointer transition-all">
+                    <input type="radio" name="sending-target" value="custom" onchange="updateAudienceSelectionUI()" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                    <div class="flex-1">
+                      <div class="text-sm font-semibold text-slate-800">Custom Handles List</div>
+                      <div class="text-xs text-slate-500">Paste specific handles to target</div>
+                    </div>
+                  </label>
+                </div>
+
+                <!-- Custom Handles Input (Hidden by default) -->
+                <div id="custom-handles-box" class="hidden pt-2">
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Enter Handles (separated by commas or lines)</label>
+                  <textarea id="custom-handles-text" rows="3" placeholder="@deal_robot, @owner1, @shopping_bot" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs"></textarea>
+                </div>
+              </div>
+
+              <!-- Account Rotation & Safety Settings -->
+              <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                <h3 class="font-display font-bold text-slate-900 flex items-center justify-between">
+                  <span>🔄 Account Rotation Setup</span>
+                  <span id="rotation-active-count-badge" class="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">0 Accounts Ready</span>
+                </h3>
+
+                <!-- Active Accounts In Rotation Pill List -->
+                <div id="rotation-accounts-list" class="flex flex-wrap gap-1.5 p-3 rounded-xl bg-slate-50 border border-slate-200 min-h-[44px]">
+                  <span class="text-xs text-slate-400 italic">No sending accounts detected.</span>
+                </div>
+
+                <!-- Delay Slider -->
+                <div class="space-y-1.5">
+                  <div class="flex justify-between text-xs">
+                    <span class="font-semibold text-slate-700">Delay Between Dispatches</span>
+                    <span id="sending-delay-value" class="font-bold text-blue-600">15s Safe Delay</span>
+                  </div>
+                  <input id="sending-delay-slider" oninput="document.getElementById('sending-delay-value').innerText = this.value + 's Safe Delay'" type="range" min="5" max="60" value="15" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600">
+                  <div class="flex justify-between text-[10px] text-slate-400">
+                    <span>5s (Aggressive)</span>
+                    <span>15s (Recommended)</span>
+                    <span>60s (Ultra-Safe)</span>
+                  </div>
+                </div>
+
+                <!-- Max per account -->
+                <div class="flex items-center justify-between pt-1">
+                  <div>
+                    <div class="text-xs font-semibold text-slate-700">Max Sends per Account</div>
+                    <div class="text-[11px] text-slate-400">Rotates to next account after N sends</div>
+                  </div>
+                  <input id="sending-max-per-account" type="number" value="25" min="1" max="100" class="w-20 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold text-center">
+                </div>
+
+                <!-- Dispatch Button -->
+                <div class="pt-2">
+                  <button id="btn-start-sending" onclick="startManualSending()" class="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-display font-bold text-base shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                    <span>Start Manual Sending Campaign</span>
+                  </button>
+                </div>
+              </div>
+
+            </div>
           </div>
-        </div>
 
-        <div class="stat-card">
-          <div class="stat-icon-wrapper icon-clock">🛡️</div>
-          <div class="stat-info">
-            <div class="stat-value" style="font-size:18px;">7-Day Anti-Dupe</div>
-            <div class="stat-label">Safe MTProto Scanner</div>
-            <div class="stat-sub">Channels deduplicated</div>
+          <!-- LIVE CAMPAIGN DISPATCH MONITOR (ACTIVE PROGRESS) -->
+          <div id="campaign-monitor-card" class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div class="flex items-center gap-3">
+                <span id="monitor-status-pill" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600">
+                  <span class="w-2 h-2 rounded-full bg-slate-400"></span>
+                  <span>Idle</span>
+                </span>
+                <span id="monitor-campaign-title" class="text-sm font-bold text-slate-900">Campaign Monitor</span>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <button id="btn-stop-campaign" onclick="stopCampaign()" class="hidden px-4 py-1.5 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 font-semibold text-xs transition-all flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                  <span>Stop Campaign</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="space-y-1.5">
+              <div class="flex justify-between text-xs font-semibold">
+                <span id="monitor-progress-text" class="text-slate-600">0 of 0 Completed</span>
+                <span id="monitor-progress-percent" class="text-blue-600 font-bold">0%</span>
+              </div>
+              <div class="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
+                <div id="monitor-progress-bar" class="h-full bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full transition-all duration-300" style="width: 0%"></div>
+              </div>
+            </div>
+
+            <!-- 4 Metrics Chips -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+              <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div class="text-[11px] font-semibold text-slate-400 uppercase">Total Targets</div>
+                <div id="monitor-stat-total" class="text-xl font-bold text-slate-900 mt-0.5">0</div>
+              </div>
+              <div class="p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                <div class="text-[11px] font-semibold text-emerald-600 uppercase">Successfully Sent</div>
+                <div id="monitor-stat-sent" class="text-xl font-bold text-emerald-700 mt-0.5">0</div>
+              </div>
+              <div class="p-3 bg-red-50 rounded-xl border border-red-100">
+                <div class="text-[11px] font-semibold text-red-600 uppercase">Failed / Skipped</div>
+                <div id="monitor-stat-failed" class="text-xl font-bold text-red-700 mt-0.5">0</div>
+              </div>
+              <div class="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div class="text-[11px] font-semibold text-slate-400 uppercase">Remaining</div>
+                <div id="monitor-stat-remaining" class="text-xl font-bold text-slate-700 mt-0.5">0</div>
+              </div>
+            </div>
+
+            <!-- Current Active Rotation Info -->
+            <div class="flex flex-wrap items-center justify-between text-xs px-4 py-2.5 rounded-xl bg-slate-50 text-slate-600 border border-slate-200">
+              <div class="flex items-center gap-2">
+                <span class="font-bold text-slate-800">Active Account:</span>
+                <span id="monitor-active-account" class="font-mono text-blue-600 font-semibold">None</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="font-bold text-slate-800">Target Lead:</span>
+                <span id="monitor-active-lead" class="font-mono text-purple-600 font-semibold">None</span>
+              </div>
+            </div>
+
+            <!-- Live Dispatch Console Output -->
+            <div class="space-y-1">
+              <div class="text-xs font-bold text-slate-500 uppercase tracking-wider">Live Dispatch Stream</div>
+              <div id="monitor-log-terminal" class="bg-slate-900 text-slate-200 p-4 rounded-xl font-mono text-xs h-48 overflow-y-auto space-y-1.5 border border-slate-800">
+                <div class="text-slate-500 italic">[Waiting for dispatch campaign initiation...]</div>
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
+        </section>
 
-      <!-- Instant Live Search & Inspection Tool -->
-      <div class="scanner-card" style="margin-bottom:24px;">
-        <h3 style="font-size:16px; font-weight:700; margin-bottom:6px; color:var(--text-main);">⚡ Instant Telegram Global Search & Bio Extraction</h3>
-        <p style="font-size:13px; color:var(--text-subtle); margin-bottom:14px;">
-          Execute a live MTProto global directory search using an active connected Telegram account to instantly discover channels, read their bios, and pull leads.
-        </p>
-        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-          <input type="text" id="live-search-input" class="form-input" style="flex:1; min-width:240px;" placeholder="e.g. loot deals, amazon offers, discount coupons, flipkart loot..." />
-          <select id="live-search-limit" class="form-input" style="width:130px;">
-            <option value="10">10 Channels</option>
-            <option value="15" selected>15 Channels</option>
-            <option value="25">25 Channels</option>
-          </select>
-          <button class="btn btn-primary" onclick="executeInstantSearch()" id="btn-live-search">
-            🔍 Search & Extract Now
-          </button>
-        </div>
-        <div id="live-search-results" style="display:none; margin-top:16px; padding:14px; background:var(--bg-card-subtle); border-radius:var(--radius-md); border:1px solid var(--border-subtle);">
-          <!-- Live results populated by JS -->
-        </div>
-      </div>
 
-      <!-- Two-Column Section: Target Keywords Management & Discovered Channels Directory -->
-      <div style="display:grid; grid-template-columns: 1fr; gap:24px;">
-        
-        <!-- Target Keywords Table -->
-        <div class="leads-card">
-          <div class="leads-card-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <!-- ========================================== -->
+        <!-- SECTION 3: LOGIN ACCOUNTS TAB              -->
+        <!-- ========================================== -->
+        <section id="tab-accounts" class="tab-content hidden space-y-6">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
             <div>
-              <h3 style="font-size:16px; font-weight:700; color:var(--text-main); margin:0;">🎯 Configured Target Keywords</h3>
-              <p style="font-size:12px; color:var(--text-subtle); margin:2px 0 0 0;">Keywords rotated sequentially during autonomous 60-minute background cycles.</p>
+              <h2 class="text-2xl font-display font-bold text-slate-900">Login Accounts Management</h2>
+              <p class="text-sm text-slate-500 mt-0.5">Manage and authenticate the Telegram MTProto accounts used for distributing promotional messages via account rotation.</p>
             </div>
-            <button class="btn btn-sm btn-outline" onclick="openAddKeywordModal()">➕ Add Keyword</button>
-          </div>
-          <div class="table-container">
-            <table class="leads-table">
-              <thead>
-                <tr>
-                  <th style="width:24%;">KEYWORD</th>
-                  <th style="width:16%;">CATEGORY</th>
-                  <th style="width:14%;">CHANNELS</th>
-                  <th style="width:14%;">LEADS</th>
-                  <th style="width:16%;">LAST SEARCHED</th>
-                  <th style="width:8%;">STATUS</th>
-                  <th style="width:8%;">ACTION</th>
-                </tr>
-              </thead>
-              <tbody id="keywords-table-body">
-                <tr><td colspan="7" style="text-align:center; padding:30px; color:var(--text-subtle);">Loading keywords...</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
 
-        <!-- Discovered Channels Directory -->
-        <div class="leads-card">
-          <div class="leads-card-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div class="flex items-center gap-3">
+              <button onclick="openConnectAccountModal()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm transition-all">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                <span>Connect Telegram Account</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Accounts Grid -->
+          <div id="accounts-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            <div class="col-span-full py-12 text-center text-slate-400 bg-white rounded-2xl border border-slate-200">
+              Loading registered accounts...
+            </div>
+          </div>
+        </section>
+
+
+        <!-- ========================================== -->
+        <!-- SECTION 4: AUTOMATIC SENDING REPORT TAB    -->
+        <!-- ========================================== -->
+        <section id="tab-reports" class="tab-content hidden space-y-6">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
             <div>
-              <h3 style="font-size:16px; font-weight:700; color:var(--text-main); margin:0;">📡 Discovered Telegram Channels Directory</h3>
-              <p style="font-size:12px; color:var(--text-subtle); margin:2px 0 0 0;">Public deal channels found via keyword searches with inspected bios and extracted leads.</p>
+              <h2 class="text-2xl font-display font-bold text-slate-900">Automatic Sending Reports</h2>
+              <p class="text-sm text-slate-500 mt-0.5">Comprehensive audit logs and performance statistics across all sending accounts and dispatched campaigns.</p>
             </div>
-            <div style="display:flex; gap:10px;">
-              <input type="text" id="discovered-channels-search" class="form-input" style="width:220px; font-size:12px; padding:6px 10px;" placeholder="Search channels..." oninput="debounceDiscoveredSearch()" />
-              <button class="btn btn-sm btn-outline" onclick="loadDiscoveredChannels()">🔄 Refresh</button>
+
+            <div class="flex items-center gap-3">
+              <button onclick="exportReportsCsv()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-all">
+                <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                <span>Export Audit CSV</span>
+              </button>
             </div>
           </div>
-          <div class="table-container">
-            <table class="leads-table">
-              <thead>
-                <tr>
-                  <th style="width:28%;">CHANNEL NAME</th>
-                  <th style="width:22%;">USERNAME / INVITE</th>
-                  <th style="width:18%;">MATCHING KEYWORD</th>
-                  <th style="width:14%;">SUBSCRIBERS</th>
-                  <th style="width:10%;">LEADS FOUND</th>
-                  <th style="width:8%;">ACTION</th>
-                </tr>
-              </thead>
-              <tbody id="discovered-channels-body">
-                <tr><td colspan="6" style="text-align:center; padding:30px; color:var(--text-subtle);">Loading discovered channels...</td></tr>
-              </tbody>
-            </table>
+
+          <!-- 4 Summary KPI Cards -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+              <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Messages Sent</div>
+              <div id="report-stat-total" class="text-3xl font-display font-extrabold text-slate-900 mt-1">0</div>
+              <div class="text-[11px] text-slate-400 mt-0.5">All-time promotional deliveries</div>
+            </div>
+
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+              <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Sent Today</div>
+              <div id="report-stat-today" class="text-3xl font-display font-extrabold text-blue-600 mt-1">0</div>
+              <div class="text-[11px] text-slate-400 mt-0.5">Messages dispatched today</div>
+            </div>
+
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+              <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Delivery Success Rate</div>
+              <div id="report-stat-success-rate" class="text-3xl font-display font-extrabold text-emerald-600 mt-1">100%</div>
+              <div class="text-[11px] text-slate-400 mt-0.5">Successful MTProto dispatches</div>
+            </div>
+
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+              <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Active Senders</div>
+              <div id="report-stat-accounts" class="text-3xl font-display font-extrabold text-purple-600 mt-1">0</div>
+              <div class="text-[11px] text-slate-400 mt-0.5">Telegram accounts in rotation</div>
+            </div>
           </div>
-        </div>
+
+          <!-- Analytics Breakdown: By Account & By Lead Type -->
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <!-- Left: Breakdown by Sending Account -->
+            <div class="lg:col-span-7 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+              <h3 class="font-display font-bold text-slate-900 text-sm">📊 Deliveries by Sender Account</h3>
+              <div class="overflow-x-auto">
+                <table class="w-full text-left text-xs">
+                  <thead class="bg-slate-50 text-slate-500 uppercase font-semibold">
+                    <tr>
+                      <th class="py-2.5 px-3">Sender Phone</th>
+                      <th class="py-2.5 px-3">Account Name</th>
+                      <th class="py-2.5 px-3 text-right">Messages Sent</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reports-by-account-tbody" class="divide-y divide-slate-100">
+                    <tr><td colspan="3" class="py-4 text-center text-slate-400">No dispatch data yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Right: Breakdown by Lead Type -->
+            <div class="lg:col-span-5 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+              <h3 class="font-display font-bold text-slate-900 text-sm">🎯 Target Segmentation Breakdown</h3>
+              <div id="reports-type-breakdown-box" class="space-y-4 py-2">
+                <div>
+                  <div class="flex justify-between text-xs font-semibold mb-1">
+                    <span class="text-slate-700">🤖 Userbots</span>
+                    <span id="breakdown-userbots-count" class="text-blue-600">0 (0%)</span>
+                  </div>
+                  <div class="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div id="breakdown-userbots-bar" class="h-full bg-blue-500 rounded-full" style="width: 0%"></div>
+                  </div>
+                </div>
+
+                <div>
+                  <div class="flex justify-between text-xs font-semibold mb-1">
+                    <span class="text-slate-700">👤 Usernames</span>
+                    <span id="breakdown-usernames-count" class="text-purple-600">0 (0%)</span>
+                  </div>
+                  <div class="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div id="breakdown-usernames-bar" class="h-full bg-purple-500 rounded-full" style="width: 0%"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Comprehensive Delivery Audit Log Table -->
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div class="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div class="font-display font-bold text-slate-900 text-sm">Delivery Audit Logs</div>
+              <div class="flex items-center gap-2">
+                <select id="reports-status-filter" onchange="loadReports()" class="text-xs py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-lg text-slate-700 font-medium">
+                  <option value="">All Statuses</option>
+                  <option value="sent">Sent Only</option>
+                  <option value="failed">Failed Only</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-left text-sm">
+                <thead class="bg-slate-50/75 border-b border-slate-200 text-slate-500 uppercase text-[11px] font-semibold tracking-wider">
+                  <tr>
+                    <th class="py-3.5 px-6">Timestamp</th>
+                    <th class="py-3.5 px-4">Recipient Handle</th>
+                    <th class="py-3.5 px-4">Type</th>
+                    <th class="py-3.5 px-4">Sender Phone</th>
+                    <th class="py-3.5 px-4">Post Title</th>
+                    <th class="py-3.5 px-4">Status</th>
+                    <th class="py-3.5 px-6">Details / Note</th>
+                  </tr>
+                </thead>
+                <tbody id="reports-table-body" class="divide-y divide-slate-100">
+                  <tr>
+                    <td colspan="7" class="py-12 text-center text-slate-400">Loading delivery history...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
 
       </div>
+    </main>
+  </div>
 
-    </div>
-
-    <!-- VIEW 3: Bio Scanner Playground -->
-    <div id="tab-playground" class="view-content">
-      <div class="scanner-card">
-        <h2 style="font-size:18px; margin-bottom:6px; color:var(--text-main);">🧪 Test Telegram Channel Bio Scanner</h2>
-        <p style="font-size:13px; color:var(--text-subtle); margin-bottom:20px;">
-          Paste sample channel descriptions, pinned message text, or invite links to test instant handle extraction and bot classification.
-        </p>
-
-        <div class="form-group">
-          <label>Source Channel Name (Simulation)</label>
-          <input type="text" id="test-channel-name" class="form-input" value="Top Deals India VIP" />
-        </div>
-
-        <div class="form-group">
-          <label>Source Channel Invite Link</label>
-          <input type="text" id="test-invite-link" class="form-input" value="https://t.me/topdealsvip" />
-        </div>
-
-        <div class="form-group">
-          <label>Channel Description / Bio Text</label>
-          <textarea id="test-bio-text" class="form-textarea" rows="4" placeholder="e.g. Welcome! For paid promotions contact owner @DealsAdminVIP or message our deal alert bot @LootAlertBot...">🔥 Official Deals Channel!
-For paid promotions & business inquiries, DM @OwnerAlex or @DealsPartner.
-To submit deal suggestions, use our automated bot: @DealSubmissionBot.
-Backups: https://t.me/DealBackups</textarea>
-        </div>
-
-        <button class="btn btn-primary" onclick="runScannerTest()">
-          🚀 Extract Leads & Save
-        </button>
-
-        <div id="test-results" style="margin-top:24px; display:none;">
-          <h3 style="font-size:15px; margin-bottom:12px;">Extraction Results</h3>
-          <div id="test-results-list" style="display:flex; flex-direction:column; gap:8px;"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- VIEW 3: Live Activity Logs -->
-    <div id="tab-logs" class="view-content">
-      <div class="log-container">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-          <h2 style="font-size:16px; font-weight:700;">⚡ Real-time Activity Log</h2>
-          <button class="btn btn-outline" onclick="loadLogs()" style="padding:6px 12px; font-size:12px;">Refresh Logs</button>
-        </div>
-        <div id="log-list">
-          <!-- Populated dynamically -->
-        </div>
-      </div>
-    </div>
-
-    <!-- VIEW 4: Integration Settings -->
-    <div id="tab-settings" class="view-content">
-      <div class="scanner-card">
-        <h2 style="font-size:18px; margin-bottom:16px;">⚙️ ProAffiliaters Integration Details</h2>
-        <table style="width:100%; border-collapse:collapse;">
-          <tbody>
-            <tr>
-              <td style="padding:12px; font-weight:600; width:220px; color:var(--text-subtle);">External API Endpoint</td>
-              <td style="padding:12px; font-family:monospace; background:var(--bg-card-subtle); border-radius:6px;">https://app.proaffiliaters.com/api/external/sources/recent</td>
-            </tr>
-            <tr>
-              <td style="padding:12px; font-weight:600; color:var(--text-subtle);">Auth Header</td>
-              <td style="padding:12px; font-family:monospace; background:var(--bg-card-subtle); border-radius:6px;">x-api-key: proaff_ext_source_sync_key_2026</td>
-            </tr>
-            <tr>
-              <td style="padding:12px; font-weight:600; color:var(--text-subtle);">Sync Window Interval</td>
-              <td style="padding:12px;"><strong>Every 30 Minutes</strong> (<code>minutes=30</code>)</td>
-            </tr>
-            <tr>
-              <td style="padding:12px; font-weight:600; color:var(--text-subtle);">Storage Rule</td>
-              <td style="padding:12px; color:var(--success); font-weight:600;">✅ Only Leads stored in MongoDB; Sources ephemeral</td>
-            </tr>
-            <tr>
-              <td style="padding:12px; font-weight:600; color:var(--text-subtle);">Bot vs. User Classification</td>
-              <td style="padding:12px;">Usernames ending in <code>bot</code> / <code>_bot</code> classified as <strong>bot</strong>, all others as <strong>user</strong>.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-      </main>
-
-      <!-- Footer -->
-      <footer class="app-footer">
-        ProAffiliaters Lead Promotion Engine &copy; 2026 • Automated 30-Minute Channel Polling & Outreach.
-      </footer>
-
-    </div><!-- /.main-wrapper -->
-  </div><!-- /.app-shell -->
-
-  <!-- Modal: Connect Telegram Account -->
-  <div id="modal-add-account" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,0.6); backdrop-filter:blur(3px); z-index:999; align-items:center; justify-content:center; padding:16px;">
-    <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-lg); width:100%; max-width:440px; padding:24px; box-shadow:var(--shadow-md); position:relative;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-        <h3 style="font-size:16px; font-weight:700; color:var(--text-main);">➕ Connect Telegram Account</h3>
-        <button onclick="closeAddAccountModal()" style="border:none; background:transparent; font-size:20px; cursor:pointer; color:var(--text-subtle);">&times;</button>
+  <!-- MODAL: ADD LEAD -->
+  <div id="modal-add-lead" class="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-2xl p-6 space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+        <h3 class="font-display font-bold text-lg text-slate-900">Add New Lead</h3>
+        <button onclick="closeAddLeadModal()" class="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
       </div>
 
-      <!-- Step 1: Phone + Slot -->
-      <div id="account-step-1">
-        <div class="form-group">
-          <label style="font-size:12px; font-weight:600; color:var(--text-main); display:block; margin-bottom:6px;">Phone Number (with Country Code)</label>
-          <input type="text" id="acc-phone-input" class="form-input" placeholder="+919876543210" style="width:100%;" />
-          <span style="font-size:11px; color:var(--text-subtle); display:block; margin-top:4px;">Example: +1234567890 or +919876543210</span>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Telegram Username / Handle</label>
+          <input id="modal-lead-username" type="text" placeholder="e.g. @loot_deal_bot or admin_handle" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
-        <div class="form-group" style="margin-top:14px;">
-          <label style="font-size:12px; font-weight:600; color:var(--text-main); display:block; margin-bottom:6px;">Assign to Slot / Week</label>
-          <select id="acc-slot-select" class="form-input" style="width:100%; padding:8px 10px;">
-            <option value="1">Slot 1 - Week 1 (Post #1 Forwarder)</option>
-            <option value="2">Slot 2 - Week 2 (Post #2 Forwarder)</option>
-            <option value="3">Slot 3 - Week 3 (Post #3 Forwarder)</option>
-            <option value="4">Slot 4 - Week 4 (Post #4 Forwarder)</option>
-            <option value="5">Slot 5 - Week 5 (Post #5 Forwarder)</option>
-            <option value="6">Slot 6 (Reserve / Backup)</option>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Lead Type</label>
+          <select id="modal-lead-type" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="bot">🤖 Userbot (Deal Bot)</option>
+            <option value="user">👤 Username (Human Channel Owner)</option>
           </select>
         </div>
-        <button class="btn btn-primary" id="btn-acc-send-code" onclick="submitStartLogin()" style="width:100%; margin-top:20px; justify-content:center;">
-          📨 Send Telegram Login Code
-        </button>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Discovered Source / Note (Optional)</label>
+          <input id="modal-lead-source" type="text" placeholder="e.g. Amazon Deals Channel" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
       </div>
 
-      <!-- Step 2: OTP Code + 2FA -->
-      <div id="account-step-2" style="display:none;">
-        <div style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:var(--radius-sm); padding:10px 12px; margin-bottom:14px; font-size:12px; color:#1d4ed8;">
-          Verification code sent to <strong id="acc-display-phone"></strong>. Please check your official Telegram app or SMS.
-        </div>
-        <div class="form-group">
-          <label style="font-size:12px; font-weight:600; color:var(--text-main); display:block; margin-bottom:6px;">5-Digit Verification Code</label>
-          <input type="text" id="acc-code-input" class="form-input" placeholder="12345" style="width:100%; letter-spacing:4px; font-weight:700; font-size:16px; text-align:center;" />
-        </div>
-        <div class="form-group" style="margin-top:12px;" id="acc-pwd-group">
-          <label style="font-size:12px; font-weight:600; color:var(--text-main); display:block; margin-bottom:6px;">2FA Cloud Password (if enabled)</label>
-          <input type="password" id="acc-pwd-input" class="form-input" placeholder="Leave blank if 2FA is off" style="width:100%;" />
-        </div>
-        <button class="btn btn-primary" id="btn-acc-verify-code" onclick="submitCompleteLogin()" style="width:100%; margin-top:20px; justify-content:center;">
-          ✅ Verify & Connect Account
-        </button>
-        <button class="btn btn-outline" onclick="resetLoginStep()" style="width:100%; margin-top:8px; justify-content:center;">
-          Back to Phone Input
-        </button>
+      <div class="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+        <button onclick="closeAddLeadModal()" class="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 font-semibold text-sm">Cancel</button>
+        <button onclick="submitAddLead()" class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm shadow-sm">Save Lead</button>
       </div>
     </div>
   </div>
 
-  <!-- Modal: Add Target Keyword -->
-  <div id="modal-add-keyword" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,0.6); backdrop-filter:blur(3px); z-index:999; align-items:center; justify-content:center; padding:16px;">
-    <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-lg); width:100%; max-width:440px; padding:24px; box-shadow:var(--shadow-md); position:relative;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-        <h3 style="font-size:16px; font-weight:700; color:var(--text-main);">➕ Add Target Search Keyword</h3>
-        <button onclick="closeAddKeywordModal()" style="border:none; background:transparent; font-size:20px; cursor:pointer; color:var(--text-subtle);">&times;</button>
+  <!-- MODAL: CONNECT TELEGRAM ACCOUNT -->
+  <div id="modal-connect-account" class="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-2xl p-6 space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+        <h3 class="font-display font-bold text-lg text-slate-900">Connect Telegram Account</h3>
+        <button onclick="closeConnectAccountModal()" class="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
       </div>
-      <p style="font-size:13px; color:var(--text-subtle); margin-bottom:16px;">
-        The autonomous engine will search Telegram's global directory for this keyword, inspect matching channel bios, and pull leads into MongoDB.
-      </p>
-      <div class="form-group">
-        <label style="font-size:12px; font-weight:600; color:var(--text-main); display:block; margin-bottom:6px;">Keyword (e.g. loot deals, amazon deals, coupons)</label>
-        <input type="text" id="modal-kw-input" class="form-input" placeholder="e.g. loot deals" style="width:100%;" />
+
+      <!-- Step 1: Phone -->
+      <div id="account-step-1" class="space-y-3">
+        <p class="text-xs text-slate-500">Enter the international phone number associated with your Telegram account (e.g. +919876543210).</p>
+        <div>
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Phone Number</label>
+          <input id="modal-account-phone" type="text" placeholder="+919876543210" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div class="pt-2">
+          <button id="btn-modal-send-code" onclick="submitStartAccountLogin()" class="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm shadow-sm flex items-center justify-center gap-2">
+            <span>Send Telegram OTP Code</span>
+          </button>
+        </div>
       </div>
-      <div class="form-group" style="margin-top:14px;">
-        <label style="font-size:12px; font-weight:600; color:var(--text-main); display:block; margin-bottom:6px;">Category Tag</label>
-        <select id="modal-kw-category" class="form-input" style="width:100%; padding:8px 10px;">
-          <option value="deals">Deals & Loot</option>
-          <option value="amazon">Amazon Deals</option>
-          <option value="flipkart">Flipkart Deals</option>
-          <option value="coupons">Discount Coupons</option>
-          <option value="affiliate">Affiliate Programs</option>
-          <option value="general">General Shopping</option>
-        </select>
-      </div>
-      <div style="display:flex; gap:10px; margin-top:20px;">
-        <button class="btn btn-outline" onclick="closeAddKeywordModal()" style="flex:1; justify-content:center;">Cancel</button>
-        <button class="btn btn-primary" onclick="submitAddKeyword()" style="flex:1; justify-content:center;">Add Keyword</button>
+
+      <!-- Step 2: OTP & 2FA -->
+      <div id="account-step-2" class="space-y-3 hidden">
+        <p class="text-xs text-slate-500">Enter the verification code sent to your Telegram app for <span id="modal-display-phone" class="font-bold text-slate-800"></span>.</p>
+        <div>
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">Verification Code</label>
+          <input id="modal-account-code" type="text" placeholder="12345" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1">2FA Cloud Password (Optional)</label>
+          <input id="modal-account-password" type="password" placeholder="Leave blank if not set" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div class="pt-2">
+          <button id="btn-modal-complete-login" onclick="submitCompleteAccountLogin()" class="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm shadow-sm flex items-center justify-center gap-2">
+            <span>Authorize & Connect Account</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Toast Element -->
-  <div id="toast">Message</div>
 
-  <!-- JavaScript Logic -->
+  <!-- CLIENT JAVASCRIPT -->
   <script>
-    let allLeads = [];
-    let currentTypeFilter = "all";
-    let isTelegramConfigured = false;
+    // State
+    let currentTab = 'tab-leads';
+    let currentLeadType = 'bot'; // 'bot' (Userbots) or 'user' (Usernames)
+    let leadsData = [];
+    let accountsData = [];
+    let savedTemplates = [];
+    let campaignPollInterval = null;
+    let pendingLoginToken = null;
+    let searchDebounceTimer = null;
 
-    async function loadStats() {
-      try {
-        const res = await fetch('/api/stats');
-        const data = await res.json();
-        document.getElementById('kpi-total').textContent = data.total_leads || 0;
-        document.getElementById('kpi-users').textContent = data.total_users || 0;
-        document.getElementById('kpi-bots').textContent = data.total_bots || 0;
-        const totalLeads = data.total_leads || 0;
-        ['leads-tab-count', 'leads-sidebar-count'].forEach(id => {
-          const el = document.getElementById(id);
-          if (el) el.textContent = totalLeads;
-        });
-        document.getElementById('kpi-storage').textContent = data.storage_engine || "MongoDB";
+    // Toast Notification Utility
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      const colors = {
+        success: 'bg-emerald-600 text-white',
+        error: 'bg-red-600 text-white',
+        info: 'bg-slate-900 text-white',
+        warning: 'bg-amber-600 text-white'
+      };
+      toast.className = `px-4 py-3 rounded-xl shadow-xl text-sm font-semibold pointer-events-auto transform transition-all duration-300 translate-y-2 opacity-0 flex items-center gap-2 ${colors[type] || colors.info}`;
+      toast.innerHTML = `<span>${message}</span>`;
+      container.appendChild(toast);
+      setTimeout(() => { toast.classList.remove('translate-y-2', 'opacity-0'); }, 10);
+      setTimeout(() => {
+        toast.classList.add('opacity-0', 'translate-y-2');
+        setTimeout(() => toast.remove(), 300);
+      }, 4000);
+    }
 
-        isTelegramConfigured = !!data.telegram_configured;
-        const banner = document.getElementById('telegram-config-banner');
-        if (banner) {
-          banner.style.display = isTelegramConfigured ? 'none' : 'block';
-        }
-      } catch (e) {
-        console.error("Failed to load stats", e);
+    // Switch Top-level Tabs
+    function switchTab(tabId) {
+      currentTab = tabId;
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      const activeEl = document.getElementById(tabId);
+      if (activeEl) activeEl.classList.remove('hidden');
+
+      document.querySelectorAll('.nav-item').forEach(el => {
+        el.classList.remove('active');
+        el.classList.add('text-slate-600');
+      });
+      const btn = document.getElementById('nav-btn-' + tabId.replace('tab-', ''));
+      if (btn) {
+        btn.classList.add('active');
+        btn.classList.remove('text-slate-600');
       }
+
+      const titles = {
+        'tab-leads': 'Leads',
+        'tab-sending': 'Manual Sending',
+        'tab-accounts': 'Login Accounts',
+        'tab-reports': 'Sending Reports'
+      };
+      document.getElementById('header-breadcrumb').innerText = `ProAffiliaters / ${titles[tabId] || 'Dashboard'}`;
+
+      if (tabId === 'tab-leads') loadLeads();
+      if (tabId === 'tab-sending') { loadSendingData(); checkCampaignStatus(); }
+      if (tabId === 'tab-accounts') loadAccounts();
+      if (tabId === 'tab-reports') loadReports();
+    }
+
+    function refreshCurrentTab() {
+      loadStats();
+      if (currentTab === 'tab-leads') loadLeads();
+      if (currentTab === 'tab-sending') { loadSendingData(); checkCampaignStatus(); }
+      if (currentTab === 'tab-accounts') loadAccounts();
+      if (currentTab === 'tab-reports') loadReports();
+      showToast('Dashboard refreshed.', 'info');
+    }
+
+    // --- LEADS SECTION ---
+    function switchLeadSubTab(type) {
+      currentLeadType = type;
+      const botBtn = document.getElementById('subtab-btn-userbots');
+      const userBtn = document.getElementById('subtab-btn-usernames');
+
+      if (type === 'bot') {
+        botBtn.className = 'px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white shadow-sm transition-all flex items-center gap-2';
+        userBtn.className = 'px-4 py-2 text-sm font-medium rounded-lg text-slate-600 hover:bg-slate-200 transition-all flex items-center gap-2';
+      } else {
+        userBtn.className = 'px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white shadow-sm transition-all flex items-center gap-2';
+        botBtn.className = 'px-4 py-2 text-sm font-medium rounded-lg text-slate-600 hover:bg-slate-200 transition-all flex items-center gap-2';
+      }
+      loadLeads();
+    }
+
+    function debounceLeadsSearch() {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(loadLeads, 300);
     }
 
     async function loadLeads() {
+      const search = document.getElementById('leads-search-input').value.trim();
+      const status = document.getElementById('leads-status-select').value;
+      const tbody = document.getElementById('leads-table-body');
+
       try {
-        const res = await fetch('/api/leads?limit=300');
+        const res = await fetch(`/api/leads?lead_type=${currentLeadType}&status=${status}&search=${encodeURIComponent(search)}&limit=300`);
         const data = await res.json();
-        allLeads = data.leads || [];
-        renderLeadsTable();
-      } catch (e) {
-        console.error("Failed to load leads", e);
-      }
-    }
+        leadsData = data.leads || [];
 
-    async function loadLogs() {
-      try {
-        const res = await fetch('/api/logs');
-        const data = await res.json();
-        const container = document.getElementById('log-list');
-        container.innerHTML = '';
-        
-        (data.logs || []).forEach(l => {
-          const div = document.createElement('div');
-          div.className = 'log-entry';
-          div.innerHTML = `
-            <span class="log-time">${l.timestamp}</span>
-            <span class="log-badge log-${l.type}">${l.type}</span>
-            <span style="flex:1;">${escapeHtml(l.message)}</span>
-          `;
-          container.appendChild(div);
-        });
-      } catch (e) {
-        console.error("Failed to load logs", e);
-      }
-    }
-
-    function renderLeadsTable() {
-      const tbody = document.getElementById('leads-tbody');
-      tbody.innerHTML = '';
-
-      const searchVal = document.getElementById('search-input').value.toLowerCase();
-      const statusVal = document.getElementById('status-select').value;
-
-      const filtered = allLeads.filter(l => {
-        // Type filter
-        if (currentTypeFilter !== "all" && l.lead_type !== currentTypeFilter) return false;
-        // Status filter
-        if (statusVal !== "all" && l.status !== statusVal) return false;
-        // Search text filter
-        if (searchVal) {
-          const u = (l.username || '').toLowerCase();
-          const b = (l.bio_context || '').toLowerCase();
-          const s = (l.extracted_from?.source_name || '').toLowerCase();
-          if (!u.includes(searchVal) && !b.includes(searchVal) && !s.includes(searchVal)) return false;
+        if (leadsData.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="6" class="py-12 text-center text-slate-400">No ${currentLeadType === 'bot' ? 'userbots' : 'usernames'} found matching your criteria.</td></tr>`;
+          document.getElementById('leads-pagination-info').innerText = 'Showing 0 leads';
+          return;
         }
-        return true;
-      });
 
-      if (filtered.length === 0) {
-        tbody.innerHTML = `
-          <tr>
-            <td colspan="6" class="empty-state">
-              <div class="empty-icon">🔍</div>
-              <p>No leads found matching current filters.</p>
-            </td>
-          </tr>
-        `;
-        return;
-      }
+        tbody.innerHTML = leadsData.map(l => {
+          const handle = l.username ? (l.username.startsWith('@') ? l.username : '@' + l.username) : '@unknown';
+          const clean = handle.replace('@', '');
+          const isBot = l.lead_type === 'bot' || clean.toLowerCase().endsWith('bot');
+          const typeBadge = isBot
+            ? `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">🤖 Userbot</span>`
+            : `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">👤 Username</span>`;
 
-      filtered.forEach(lead => {
-        const isBot = lead.lead_type === 'bot';
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>
-            <div class="lead-profile">
-              <div class="lead-avatar ${isBot ? 'avatar-bot' : 'avatar-user'}">
-                ${isBot ? '🤖' : '👤'}
-              </div>
-              <div class="lead-meta">
-                <a href="https://t.me/${lead.username}" target="_blank" class="lead-username">
-                  @${escapeHtml(lead.username)}
-                  <span style="font-size:10px; color:var(--primary);">↗</span>
+          const sources = (l.extracted_from || []).map(s => s.channel_name).filter(Boolean).join(', ') || 'Direct';
+          const firstSeen = l.first_seen_at ? l.first_seen_at.substring(0, 10) : 'Recent';
+
+          const statusColors = {
+            pending: 'bg-amber-50 text-amber-700 border-amber-200',
+            contacted: 'bg-blue-50 text-blue-700 border-blue-200',
+            replied: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+            converted: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+            ignored: 'bg-slate-100 text-slate-500 border-slate-200'
+          };
+          const currentStatus = l.status || 'pending';
+
+          return `
+            <tr class="hover:bg-slate-50/75 transition-all">
+              <td class="py-3 px-6 font-semibold text-slate-900">
+                <a href="https://t.me/${clean}" target="_blank" class="hover:text-blue-600 hover:underline flex items-center gap-1.5">
+                  <span>${handle}</span>
+                  <svg class="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
                 </a>
-                <button class="btn-copy" onclick="copyText('@${lead.username}')">📋 Copy</button>
-              </div>
-            </div>
-          </td>
-          <td>
-            <span class="badge-type ${isBot ? 'badge-bot' : 'badge-user'}">
-              ${isBot ? 'Bot' : 'Human User'}
-            </span>
-          </td>
-          <td>
-            <select class="select-status" style="padding:4px 8px; font-size:11px; font-weight:700;" onchange="changeStatus('${lead.username_clean}', this.value)">
-              <option value="new" ${lead.status === 'new' ? 'selected' : ''}>New</option>
-              <option value="contacted" ${lead.status === 'contacted' ? 'selected' : ''}>Contacted</option>
-              <option value="converted" ${lead.status === 'converted' ? 'selected' : ''}>Converted</option>
-              <option value="ignored" ${lead.status === 'ignored' ? 'selected' : ''}>Ignored</option>
-            </select>
-          </td>
-          <td>
-            <div class="channel-source">
-              <span class="channel-name">${escapeHtml(lead.extracted_from?.source_name || 'Direct Channel')}</span>
-              ${lead.extracted_from?.source_invite_link ? `<a href="${lead.extracted_from.source_invite_link}" target="_blank" class="channel-link">${escapeHtml(lead.extracted_from.source_invite_link)}</a>` : ''}
-            </div>
-          </td>
-          <td>
-            <div class="bio-snippet" title="${escapeHtml(lead.bio_context || '')}">
-              ${escapeHtml(lead.bio_context || 'No bio snippet recorded')}
-            </div>
-          </td>
-          <td>
-            <a href="https://t.me/${lead.username}" target="_blank" class="btn btn-outline" style="padding:5px 12px; font-size:12px;">
-              Open Chat
-            </a>
-          </td>
-        `;
-        tbody.appendChild(tr);
-      });
+              </td>
+              <td class="py-3 px-4">${typeBadge}</td>
+              <td class="py-3 px-4 text-xs text-slate-600 truncate max-w-[180px]" title="${sources}">${sources}</td>
+              <td class="py-3 px-4">
+                <select onchange="updateLeadStatus('${clean}', this.value)" class="text-xs py-1 px-2.5 rounded-lg border font-semibold ${statusColors[currentStatus] || 'bg-slate-100 text-slate-700'}">
+                  <option value="pending" ${currentStatus === 'pending' ? 'selected' : ''}>Pending</option>
+                  <option value="contacted" ${currentStatus === 'contacted' ? 'selected' : ''}>Contacted</option>
+                  <option value="replied" ${currentStatus === 'replied' ? 'selected' : ''}>Replied</option>
+                  <option value="converted" ${currentStatus === 'converted' ? 'selected' : ''}>Converted</option>
+                  <option value="ignored" ${currentStatus === 'ignored' ? 'selected' : ''}>Ignored</option>
+                </select>
+              </td>
+              <td class="py-3 px-4 text-xs text-slate-500">${firstSeen}</td>
+              <td class="py-3 px-6 text-right">
+                <button onclick="deleteLead('${clean}')" title="Delete Lead" class="p-1.5 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-all">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        document.getElementById('leads-pagination-info').innerText = `Showing ${leadsData.length} leads`;
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-red-500 font-semibold">Failed to load leads: ${e.message}</td></tr>`;
+      }
     }
 
-    async function changeStatus(usernameClean, newStatus) {
+    async function updateLeadStatus(username, newStatus) {
       try {
-        const res = await fetch(`/api/leads/${usernameClean}/status`, {
+        const res = await fetch(`/api/leads/${username}/status`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status: newStatus })
         });
         if (res.ok) {
-          showToast(`Updated @${usernameClean} status to ${newStatus}`);
+          showToast(`Updated @${username} status to ${newStatus}`, 'success');
+          loadStats();
+        } else {
+          showToast('Failed to update status', 'error');
+        }
+      } catch (e) {
+        showToast('Error updating status: ' + e.message, 'error');
+      }
+    }
+
+    async function deleteLead(username) {
+      if (!confirm(`Are you sure you want to delete lead @${username}?`)) return;
+      try {
+        const res = await fetch(`/api/leads/${username}`, { method: 'DELETE' });
+        if (res.ok) {
+          showToast(`Deleted lead @${username}`, 'info');
+          loadLeads();
           loadStats();
         }
       } catch (e) {
-        showToast("Failed to update status");
+        showToast('Error deleting lead', 'error');
       }
     }
 
-    async function triggerManualSync() {
-      const btn = document.getElementById('btn-sync-now');
-      btn.disabled = true;
-      btn.textContent = '⏳ Syncing...';
-      try {
-        const res = await fetch('/api/trigger-sync', { method: 'POST' });
-        const data = await res.json();
-        showToast(data.message || `Sync completed! Found ${data.sources_count || 0} sources.`);
-        await loadAll();
-      } catch (e) {
-        showToast("Error connecting to ProAffiliaters API");
-      } finally {
-        btn.disabled = false;
-        btn.textContent = '⚡ Sync API Now';
-      }
+    function exportLeadsCsv() {
+      const status = document.getElementById('leads-status-select').value;
+      const search = document.getElementById('leads-search-input').value.trim();
+      window.location.href = `/api/leads/export-csv?lead_type=${currentLeadType}&status=${status}&search=${encodeURIComponent(search)}`;
     }
 
-    async function runScannerTest() {
-      const bioText = document.getElementById('test-bio-text').value;
-      const channelName = document.getElementById('test-channel-name').value;
-      const inviteLink = document.getElementById('test-invite-link').value;
+    // Modal Add Lead
+    function openAddLeadModal() {
+      document.getElementById('modal-lead-username').value = '';
+      document.getElementById('modal-lead-source').value = '';
+      document.getElementById('modal-add-lead').classList.remove('hidden');
+    }
+    function closeAddLeadModal() {
+      document.getElementById('modal-add-lead').classList.add('hidden');
+    }
+    async function submitAddLead() {
+      const username = document.getElementById('modal-lead-username').value.trim();
+      const lead_type = document.getElementById('modal-lead-type').value;
+      const source = document.getElementById('modal-lead-source').value.trim();
+
+      if (!username) {
+        alert('Please enter a username or handle.');
+        return;
+      }
 
       try {
-        const res = await fetch('/api/scan-test', {
+        const res = await fetch('/api/leads', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bio_text: bioText, channel_name: channelName, invite_link: inviteLink })
+          body: JSON.stringify({ username, lead_type, source: source || 'Manual Entry' })
         });
-        const data = await res.json();
-        
-        const resultsBox = document.getElementById('test-results');
-        const list = document.getElementById('test-results-list');
-        resultsBox.style.display = 'block';
-        list.innerHTML = '';
-
-        if (!data.leads || data.leads.length === 0) {
-          list.innerHTML = '<p style="color:var(--text-subtle); font-size:13px;">No usernames or bot handles detected in this bio text.</p>';
-        } else {
-          data.leads.forEach(l => {
-            const isBot = l.lead_type === 'bot';
-            const item = document.createElement('div');
-            item.style.cssText = "display:flex; justify-content:space-between; align-items:center; background:var(--bg-card-subtle); padding:10px 14px; border-radius:8px;";
-            item.innerHTML = `
-              <div>
-                <strong>@${escapeHtml(l.username)}</strong>
-                <span style="font-size:12px; color:var(--text-subtle); margin-left:8px;">Clean: '${l.username_clean}'</span>
-              </div>
-              <span class="badge-type ${isBot ? 'badge-bot' : 'badge-user'}">
-                ${isBot ? '🤖 Bot' : '👤 User'}
-              </span>
-            `;
-            list.appendChild(item);
-          });
-        }
-
-        showToast(`Extracted ${data.extracted_count} leads (${data.newly_saved} newly saved to DB)!`);
-        await loadAll();
-      } catch (e) {
-        showToast("Error executing scanner test");
-      }
-    }
-
-    function setTypeFilter(type, btn) {
-      currentTypeFilter = type;
-      document.querySelectorAll('.type-pill-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      renderLeadsTable();
-    }
-
-    function filterLeads() {
-      renderLeadsTable();
-    }
-
-    function switchTab(tabId, btn, viewTitle) {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.view-content').forEach(v => v.classList.remove('active'));
-      
-      if (btn) btn.classList.add('active');
-      const navTarget = document.querySelector(`.nav-item[data-tab="${tabId}"]`);
-      if (navTarget) navTarget.classList.add('active');
-
-      const view = document.getElementById(tabId);
-      if (view) view.classList.add('active');
-
-      if (viewTitle) {
-        const titleEl = document.getElementById('current-view-title');
-        if (titleEl) titleEl.textContent = viewTitle;
-      }
-
-      // Close mobile drawer if open
-      toggleSidebar(false);
-
-      if (tabId === 'tab-infobot') loadInfoBotData();
-      if (tabId === 'tab-bot-outreach') loadBotOutreachData();
-      if (tabId === 'tab-accounts') loadAccounts();
-      if (tabId === 'tab-drip-funnel') loadDripOverview();
-      if (tabId === 'tab-keywords') loadKeywordsData();
-    }
-
-    function toggleSidebar(open) {
-      const sidebar = document.getElementById('app-sidebar');
-      const backdrop = document.getElementById('sidebar-backdrop');
-      if (!sidebar) return;
-      if (open === undefined) {
-        sidebar.classList.toggle('open');
-        if (backdrop) backdrop.classList.toggle('open');
-      } else if (open) {
-        sidebar.classList.add('open');
-        if (backdrop) backdrop.classList.add('open');
-      } else {
-        sidebar.classList.remove('open');
-        if (backdrop) backdrop.classList.remove('open');
-      }
-    }
-
-    function copyText(text) {
-      navigator.clipboard.writeText(text);
-      showToast(`Copied ${text} to clipboard!`);
-    }
-
-    function showToast(msg) {
-      const toast = document.getElementById('toast');
-      toast.textContent = msg;
-      toast.classList.add('show');
-      setTimeout(() => toast.classList.remove('show'), 3000);
-    }
-
-    function escapeHtml(text) {
-      if (!text) return '';
-      return text.replace(/[&<>"']/g, function(m) {
-        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
-      });
-    }
-
-    function exportCSV() {
-      if (!allLeads.length) {
-        showToast("No leads to export");
-        return;
-      }
-      let csv = "Username,Type,Status,Source_Channel,Invite_Link,Bio_Context\\n";
-      allLeads.forEach(l => {
-        const u = `"${(l.username || '').replace(/"/g, '""')}"`;
-        const t = `"${l.lead_type || ''}"`;
-        const s = `"${l.status || ''}"`;
-        const src = `"${(l.extracted_from?.source_name || '').replace(/"/g, '""')}"`;
-        const link = `"${(l.extracted_from?.source_invite_link || '').replace(/"/g, '""')}"`;
-        const bio = `"${(l.bio_context || '').replace(/"/g, '""')}"`;
-        csv += `${u},${t},${s},${src},${link},${bio}\\n`;
-      });
-      const blob = new Blob([csv], { type: 'text/csv' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.setAttribute('href', url);
-      a.setAttribute('download', `telegram_leads_${new Date().toISOString().slice(0,10)}.csv`);
-      a.click();
-      showToast("CSV export generated!");
-    }
-
-    let allInfoBotUsers = [];
-    let allInfoBotBroadcasts = [];
-
-    async function loadInfoBotData() {
-      try {
-        // 1. Fetch Status
-        const resStatus = await fetch('/api/info-bot/status');
-        const statusData = await resStatus.json();
-        
-        const username = statusData.bot_username || "ProaffiliatersInfoBot";
-        document.getElementById('infobot-handle-display').textContent = `@${username}`;
-        document.getElementById('infobot-deeplink-btn').href = statusData.deep_link || `https://t.me/${username}`;
-        document.getElementById('infobot-kpi-leads').textContent = statusData.total_leads || 0;
-        document.getElementById('infobot-kpi-active').textContent = statusData.active_24h || 0;
-        document.getElementById('infobot-kpi-blocked').textContent = statusData.blocked_leads || 0;
-        document.getElementById('infobot-kpi-broadcasts').textContent = statusData.broadcasts_count || 0;
-        ['infobot-tab-count', 'infobot-sidebar-count'].forEach(id => {
-          const el = document.getElementById(id);
-          if (el) el.textContent = statusData.total_leads || 0;
-        });
-
-        const badge = document.getElementById('infobot-status-badge');
-        const text = document.getElementById('infobot-status-text');
-        if (statusData.running) {
-          text.textContent = "Online & Polling";
-          badge.className = "pill-active";
-        } else {
-          text.textContent = "Offline / Inactive";
-          badge.style.background = "#fee2e2";
-          badge.style.color = "#dc2626";
-          badge.style.borderColor = "#fca5a5";
-        }
-
-        // 2. Fetch Users
-        const resUsers = await fetch('/api/info-bot/users?limit=100');
-        const usersData = await resUsers.json();
-        allInfoBotUsers = usersData.users || [];
-        document.getElementById('infobot-leads-count-label').textContent = `${allInfoBotUsers.length} Leads`;
-        renderInfoBotUsersTable();
-
-        // 3. Fetch Broadcasts
-        const resBroadcasts = await fetch('/api/info-bot/broadcasts?limit=20');
-        const broadcastsData = await resBroadcasts.json();
-        allInfoBotBroadcasts = broadcastsData.broadcasts || [];
-        renderInfoBotBroadcastsTable();
-
-      } catch (err) {
-        console.error("Failed to load Info Bot data:", err);
-      }
-    }
-
-    function renderInfoBotUsersTable() {
-      const tbody = document.getElementById('infobot-leads-tbody');
-      tbody.innerHTML = '';
-
-      const query = (document.getElementById('infobot-lead-search')?.value || '').toLowerCase();
-      const filtered = allInfoBotUsers.filter(u => {
-        if (!query) return true;
-        const name = `${u.first_name || ''} ${u.last_name || ''}`.toLowerCase();
-        const handle = (u.username || '').toLowerCase();
-        const cid = (u.telegram_chat_id || '').toLowerCase();
-        const tag = (u.start_payload || '').toLowerCase();
-        return name.includes(query) || handle.includes(query) || cid.includes(query) || tag.includes(query);
-      });
-
-      if (!filtered.length) {
-        tbody.innerHTML = '<tr><td colspan="5" style="padding:24px; text-align:center; color:var(--text-subtle);">No registered leads found.</td></tr>';
-        return;
-      }
-
-      filtered.forEach(u => {
-        const tr = document.createElement('tr');
-        tr.style.borderBottom = '1px solid var(--border-subtle)';
-        const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || "Unnamed";
-        const handle = u.username ? `@${escapeHtml(u.username)}` : '<span style="color:var(--text-subtle);">No handle</span>';
-        const tag = u.start_payload ? `<code style="background:#e0e7ff; color:#4338ca; padding:2px 6px; border-radius:4px;">${escapeHtml(u.start_payload)}</code>` : '<span style="color:var(--text-subtle);">Organic</span>';
-        const joined = u.joined_at ? new Date(u.joined_at).toLocaleDateString("en-IN") : "-";
-        const isBlocked = Boolean(u.is_blocked);
-
-        tr.innerHTML = `
-          <td style="padding:10px 12px;">
-            <strong>${escapeHtml(name)}</strong><br>
-            <span style="font-size:11px; color:var(--primary);">${handle}</span>
-          </td>
-          <td style="padding:10px 12px; font-family:monospace; color:var(--text-subtle);">${u.telegram_chat_id}</td>
-          <td style="padding:10px 12px;">${tag}</td>
-          <td style="padding:10px 12px; color:var(--text-subtle);">${joined}</td>
-          <td style="padding:10px 12px;">
-            <span style="display:inline-block; padding:2px 8px; border-radius:9999px; font-size:10px; font-weight:700; ${isBlocked ? 'background:#fee2e2; color:#dc2626;' : 'background:#d1fae5; color:#059669;'}">
-              ${isBlocked ? 'BLOCKED' : 'ACTIVE'}
-            </span>
-          </td>
-        `;
-        tbody.appendChild(tr);
-      });
-    }
-
-    function filterInfoBotUsers() {
-      renderInfoBotUsersTable();
-    }
-
-    function renderInfoBotBroadcastsTable() {
-      const tbody = document.getElementById('infobot-broadcasts-tbody');
-      tbody.innerHTML = '';
-
-      if (!allInfoBotBroadcasts.length) {
-        tbody.innerHTML = '<tr><td colspan="6" style="padding:24px; text-align:center; color:var(--text-subtle);">No previous broadcasts recorded.</td></tr>';
-        return;
-      }
-
-      allInfoBotBroadcasts.forEach((b, i) => {
-        const tr = document.createElement('tr');
-        tr.style.borderBottom = '1px solid var(--border-subtle)';
-        const date = b.created_at ? new Date(b.created_at).toLocaleString("en-IN") : "-";
-        const preview = (b.message_text || "").slice(0, 50).replace(/<[^>]*>?/gm, '');
-        const btnCount = (b.inline_buttons || []).length;
-
-        tr.innerHTML = `
-          <td style="padding:10px 14px; font-weight:500;">${date}</td>
-          <td style="padding:10px 14px; color:var(--text-main); font-weight:500;">
-            ${escapeHtml(preview)}${preview.length >= 50 ? '...' : ''}
-          </td>
-          <td style="padding:10px 14px; text-align:center;">
-            <span style="background:var(--bg-card-subtle); padding:2px 8px; border-radius:6px; font-weight:600;">${btnCount}</span>
-          </td>
-          <td style="padding:10px 14px; text-align:center; font-weight:600;">${b.total_targeted || 0}</td>
-          <td style="padding:10px 14px; text-align:center; color:var(--success); font-weight:700;">${b.successful_sent || 0}</td>
-          <td style="padding:10px 14px; text-align:center; color:${b.failed_count > 0 ? '#dc2626' : 'var(--text-subtle)'}; font-weight:700;">${b.failed_count || 0}</td>
-        `;
-        tbody.appendChild(tr);
-      });
-    }
-
-    async function sendInfoBotBroadcast() {
-      const text = document.getElementById('broadcast-message-text').value.trim();
-      const photo = document.getElementById('broadcast-photo-url').value.trim();
-      const markup = document.getElementById('broadcast-buttons-markup').value.trim();
-
-      if (!text) {
-        showToast("Please enter broadcast message text.");
-        return;
-      }
-
-      if (!confirm("Are you sure you want to dispatch this broadcast to ALL active registered leads?")) {
-        return;
-      }
-
-      const btn = document.getElementById('btn-send-broadcast');
-      btn.disabled = true;
-      btn.textContent = "⏳ Dispatching Broadcast...";
-
-      try {
-        const res = await fetch('/api/info-bot/broadcast', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message_text: text,
-            buttons_markup: markup || null,
-            photo_url: photo || null
-          })
-        });
-
         const data = await res.json();
         if (res.ok) {
-          showToast(data.message || "Broadcast successfully queued!");
-          document.getElementById('broadcast-message-text').value = '';
-          document.getElementById('broadcast-photo-url').value = '';
-          document.getElementById('broadcast-buttons-markup').value = '';
-          await loadInfoBotData();
+          showToast(`Lead @${data.username} added successfully!`, 'success');
+          closeAddLeadModal();
+          loadLeads();
+          loadStats();
         } else {
-          showToast(data.error || "Failed to dispatch broadcast");
+          alert(data.error || 'Failed to add lead');
         }
-      } catch (err) {
-        showToast("Network error while dispatching broadcast");
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "🚀 Dispatch Broadcast to All Leads";
+      } catch (e) {
+        alert('Error: ' + e.message);
       }
     }
 
-    async function loadAll() {
-      await loadStats();
-      await loadLeads();
-      await loadLogs();
-      await loadInfoBotData();
-      await loadBotOutreachData();
-    }
 
-    // ==========================================
-    // Admin Bot Outreach Logic
-    // ==========================================
-    let allPromoPosts = [];
-    let botCampaignPollInterval = null;
-
-    async function loadBotOutreachData() {
-      try {
-        // 1. Fetch Posts Status
-        const resPosts = await fetch('/api/bot-outreach/posts');
-        const postsData = await resPosts.json();
-        allPromoPosts = postsData.posts || [];
-        renderPromoPostsGrid();
-
-        // 2. Fetch Forwarder & Campaign Status
-        const resStatus = await fetch('/api/bot-outreach/status');
-        const statusData = await resStatus.json();
-        updateForwarderStatus(statusData);
-
-      } catch (err) {
-        console.error("Failed to load Bot Outreach data:", err);
-      }
-    }
-
-    function renderPromoPostsGrid() {
-      const container = document.getElementById('promo-posts-grid');
-      container.innerHTML = '';
-
-      allPromoPosts.forEach(p => {
-        const card = document.createElement('div');
-        card.className = 'scanner-card';
-        card.style.cssText = "margin:0; padding:14px; display:flex; flex-direction:column; justify-content:space-between; border-radius:12px;";
-
-        const isPub = Boolean(p.is_published);
-        const pubBadge = isPub 
-          ? `<span style="display:inline-flex; align-items:center; gap:4px; padding:3px 8px; border-radius:9999px; font-size:11px; font-weight:700; background:#d1fae5; color:#059669; border:1px solid #a7f3d0;">
-               ✅ Published (#${p.message_id})
-             </span>`
-          : `<span style="display:inline-flex; align-items:center; gap:4px; padding:3px 8px; border-radius:9999px; font-size:11px; font-weight:700; background:#f1f5f9; color:#64748b; border:1px solid #cbd5e1;">
-               ⏳ Staging Ready
-             </span>`;
-
-        card.innerHTML = `
-          <div>
-            <div style="position:relative; border-radius:8px; overflow:hidden; margin-bottom:10px; background:#0f172a; aspect-ratio:16/9;">
-              <img src="${p.image_url}" alt="Post ${p.post_number}" style="width:100%; height:100%; object-fit:cover;" onerror="this.style.display='none'" />
-              <div style="position:absolute; top:6px; left:6px; background:rgba(15,23,42,0.85); color:white; font-size:10px; font-weight:700; padding:2px 8px; border-radius:6px; backdrop-filter:blur(4px);">
-                Post #${p.post_number}
-              </div>
-            </div>
-
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:6px;">
-              <h4 style="font-size:13px; font-weight:700; color:var(--text-main); margin:0;">${escapeHtml(p.title)}</h4>
-              ${pubBadge}
-            </div>
-
-            <div style="background:var(--bg-card-subtle); border:1px solid var(--border-subtle); border-radius:6px; padding:8px; font-size:11px; margin-bottom:10px;">
-              <div style="color:var(--text-subtle); margin-bottom:2px;"><strong>Deep-Link Bot Button:</strong></div>
-              <code style="word-break:break-all; color:var(--primary); font-size:10px;">${escapeHtml(p.deep_link)}</code>
-            </div>
-
-            ${isPub && p.message_link ? `
-              <div style="font-size:11px; margin-bottom:10px;">
-                <a href="${p.message_link}" target="_blank" style="color:var(--primary); text-decoration:none; font-weight:600;">
-                  📢 Open Live Post in Telegram ↗
-                </a>
-              </div>
-            ` : ''}
-          </div>
-
-          <button class="btn btn-outline" style="width:100%; justify-content:center; padding:8px; font-size:12px;" onclick="publishPostToChannel(${p.post_number})" id="btn-pub-${p.post_number}">
-            ${isPub ? '🔁 Re-publish to Channel' : '📢 Publish to @pro_affiliaters'}
-          </button>
-        `;
-        container.appendChild(card);
-      });
-    }
-
-    async function publishPostToChannel(postNum) {
-      const btn = document.getElementById(`btn-pub-${postNum}`);
-      if (btn) {
-        btn.disabled = true;
-        btn.textContent = "⏳ Publishing...";
-      }
-
-      try {
-        const res = await fetch('/api/bot-outreach/publish', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ post_number: postNum })
-        });
-        const data = await res.json();
-        if (data.success) {
-          showToast(`Post #${postNum} successfully published to channel!`);
-          await loadBotOutreachData();
-        } else {
-          showToast(data.error || "Failed to publish post to channel");
-        }
-      } catch (err) {
-        showToast("Error connecting to server for channel publication");
-      } finally {
-        if (btn) btn.disabled = false;
-      }
-    }
-
-    async function publishAllPostsToChannel() {
-      if (!confirm("Are you sure you want to publish all 5 promotional deal posts into @pro_affiliaters?")) {
-        return;
-      }
-
-      const btn = document.getElementById('btn-publish-all');
-      btn.disabled = true;
-      btn.textContent = "⏳ Publishing 5 Posts...";
-
-      try {
-        const res = await fetch('/api/bot-outreach/publish', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ post_number: 0 })
-        });
-        const data = await res.json();
-        if (data.success) {
-          showToast("All 5 promotional posts published to @pro_affiliaters!");
-          await loadBotOutreachData();
-        } else {
-          showToast(data.error || "Error publishing all posts");
-        }
-      } catch (err) {
-        showToast("Network error publishing posts");
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "⚡ Publish All 5 Posts to Channel";
-      }
-    }
-
-    function onCampaignPostSelected() {
-      // Auto-update UI if needed
-    }
-
-    function updateForwarderStatus(statusData) {
-      const badge = document.getElementById('forwarder-telethon-badge');
-      const text = document.getElementById('forwarder-telethon-text');
-      if (statusData.telethon_connected) {
-        text.textContent = "Telethon Client Connected";
-        badge.className = "pill-active";
+    // --- MANUAL SENDING SECTION ---
+    function updateImagePreview() {
+      const url = document.getElementById('post-image-url').value.trim();
+      const container = document.getElementById('image-preview-container');
+      const img = document.getElementById('image-preview-img');
+      if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+        img.src = url;
+        container.classList.remove('hidden');
       } else {
-        text.textContent = "Telethon Ready (Session Configured)";
-        badge.className = "pill-active";
-        badge.style.background = "#e0e7ff";
-        badge.style.color = "#4338ca";
-        badge.style.borderColor = "#c7d2fe";
+        container.classList.add('hidden');
       }
+    }
 
-      const uncontactedCount = statusData.uncontacted_bots_count || 0;
-      document.getElementById('outreach-pending-bots-badge').textContent = `${uncontactedCount} Pending Bots`;
-      ['bot-outreach-tab-count', 'bot-outreach-sidebar-count'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = uncontactedCount;
-      });
-
-      // Update Campaign Monitor
-      const camp = statusData.campaign || {};
-      const state = statusData.engine_state || "idle";
-      const pill = document.getElementById('campaign-state-pill');
-      pill.textContent = state.toUpperCase();
-
-      if (state === "running") {
-        pill.style.background = "#d1fae5";
-        pill.style.color = "#059669";
-        document.getElementById('btn-pause-camp').disabled = false;
-        document.getElementById('btn-resume-camp').disabled = true;
-        document.getElementById('btn-stop-camp').disabled = false;
-        document.getElementById('btn-start-campaign').disabled = true;
-
-        if (!botCampaignPollInterval) {
-          botCampaignPollInterval = setInterval(loadBotOutreachData, 2500);
-        }
-      } else if (state === "paused") {
-        pill.style.background = "#fef3c7";
-        pill.style.color = "#d97706";
-        document.getElementById('btn-pause-camp').disabled = true;
-        document.getElementById('btn-resume-camp').disabled = false;
-        document.getElementById('btn-stop-camp').disabled = false;
-        document.getElementById('btn-start-campaign').disabled = true;
+    function updateAudienceSelectionUI() {
+      const selected = document.querySelector('input[name="sending-target"]:checked').value;
+      const customBox = document.getElementById('custom-handles-box');
+      if (selected === 'custom') {
+        customBox.classList.remove('hidden');
       } else {
-        pill.style.background = "var(--bg-card-subtle)";
-        pill.style.color = "var(--text-subtle)";
-        document.getElementById('btn-pause-camp').disabled = true;
-        document.getElementById('btn-resume-camp').disabled = true;
-        document.getElementById('btn-stop-camp').disabled = true;
-        document.getElementById('btn-start-campaign').disabled = false;
-
-        if (botCampaignPollInterval) {
-          clearInterval(botCampaignPollInterval);
-          botCampaignPollInterval = null;
-        }
+        customBox.classList.add('hidden');
       }
-
-      const targeted = camp.total_targeted || 0;
-      const sent = camp.successful_sent || 0;
-      const failed = camp.failed_count || 0;
-      const pct = targeted > 0 ? Math.round(((sent + failed) / targeted) * 100) : 0;
-
-      document.getElementById('campaign-total-count').textContent = targeted;
-      document.getElementById('campaign-sent-count').textContent = sent;
-      document.getElementById('campaign-failed-count').textContent = failed;
-      document.getElementById('campaign-progress-pct').textContent = `${pct}%`;
-      document.getElementById('campaign-progress-bar').style.width = `${pct}%`;
-      document.getElementById('campaign-current-bot').textContent = camp.current_bot ? `@${camp.current_bot}` : 'None';
-
-      // Logs
-      if (camp.logs && camp.logs.length) {
-        const term = document.getElementById('campaign-terminal-logs');
-        term.innerHTML = camp.logs.map(l => `<div>${escapeHtml(l)}</div>`).join('');
-        term.scrollTop = term.scrollHeight;
-      }
-
-      // Render past campaigns table
-      renderBotCampaignsTable(statusData.campaigns || []);
     }
 
-    function renderBotCampaignsTable(campaigns) {
-      const tbody = document.getElementById('bot-campaigns-tbody');
-      tbody.innerHTML = '';
-
-      if (!campaigns.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="padding:20px; text-align:center; color:var(--text-subtle);">No bot outreach campaigns recorded yet.</td></tr>';
-        return;
-      }
-
-      campaigns.forEach(c => {
-        const tr = document.createElement('tr');
-        tr.style.borderBottom = '1px solid var(--border-subtle)';
-        const date = c.created_at ? new Date(c.created_at).toLocaleString("en-IN") : "-";
-        const st = c.status || "completed";
-
-        tr.innerHTML = `
-          <td style="padding:10px 14px; font-weight:500;">${date}</td>
-          <td style="padding:10px 14px;"><strong>Post #${c.post_number || 1}</strong></td>
-          <td style="padding:10px 14px; color:var(--primary); font-family:monospace;">Msg #${c.channel_message_id || '-'}</td>
-          <td style="padding:10px 14px; text-align:center; font-weight:600;">${c.total_targeted || 0}</td>
-          <td style="padding:10px 14px; text-align:center; color:var(--success); font-weight:700;">${c.successful_sent || 0}</td>
-          <td style="padding:10px 14px; text-align:center; color:${c.failed_count > 0 ? '#dc2626' : 'var(--text-subtle)'}; font-weight:700;">${c.failed_count || 0}</td>
-          <td style="padding:10px 14px; text-align:center;">
-            <span style="display:inline-block; padding:2px 8px; border-radius:9999px; font-size:10px; font-weight:700; ${st === 'completed' ? 'background:#d1fae5; color:#059669;' : 'background:#e0e7ff; color:#4338ca;'}">
-              ${st.toUpperCase()}
-            </span>
-          </td>
-        `;
-        tbody.appendChild(tr);
-      });
-    }
-
-    async function testForwardSingleBot() {
-      const botInput = document.getElementById('test-single-bot-input');
-      const botUsername = botInput.value.trim();
-      const postNum = parseInt(document.getElementById('campaign-post-select').value, 10);
-
-      if (!botUsername) {
-        showToast("Please enter a bot handle (e.g. @MyDealBot)");
-        return;
-      }
-
-      const btn = document.getElementById('btn-test-forward');
-      btn.disabled = true;
-      btn.textContent = "⏳ Forwarding...";
-
+    async function loadSendingData() {
+      // 1. Load saved templates
       try {
-        const res = await fetch('/api/bot-outreach/test-forward', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            bot_username: botUsername,
-            post_number: postNum
-          })
-        });
-
+        const res = await fetch('/api/posts');
         const data = await res.json();
-        if (data.success) {
-          showToast(`Successfully forwarded Post #${postNum} to @${data.bot}!`);
-          botInput.value = '';
-          await loadBotOutreachData();
-        } else {
-          showToast(data.error || "Forwarding failed");
-        }
-      } catch (err) {
-        showToast("Network error forwarding test message");
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Forward Test";
-      }
-    }
-
-    async function startBotCampaign() {
-      const postNum = parseInt(document.getElementById('campaign-post-select').value, 10);
-      const delay = parseInt(document.getElementById('campaign-delay').value, 10) || 8;
-      const limit = parseInt(document.getElementById('campaign-limit').value, 10) || 50;
-
-      // Check if post is published
-      const targetPost = allPromoPosts.find(p => p.post_number === postNum);
-      if (!targetPost || !targetPost.is_published || !targetPost.message_id) {
-        showToast(`Post #${postNum} is not published yet! Please click "Publish to @pro_affiliaters" first.`);
-        return;
+        savedTemplates = data.posts || [];
+        const select = document.getElementById('composer-template-select');
+        select.innerHTML = '<option value="">-- Load Saved Template --</option>' +
+          savedTemplates.map(t => `<option value="${t.id}">${t.title}</option>`).join('');
+      } catch (e) {
+        console.error('Error loading templates', e);
       }
 
-      if (!confirm(`Launch outreach campaign forwarding Post #${postNum} to up to ${limit} bot leads with ${delay}s delay?`)) {
-        return;
-      }
-
-      try {
-        const res = await fetch('/api/bot-outreach/start-campaign', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            post_number: postNum,
-            channel_message_id: targetPost.message_id,
-            delay_seconds: delay,
-            target_limit: limit
-          })
-        });
-
-        const data = await res.json();
-        if (data.success) {
-          showToast("Campaign started successfully!");
-          await loadBotOutreachData();
-        } else {
-          showToast(data.error || "Failed to start campaign");
-        }
-      } catch (err) {
-        showToast("Error starting outreach campaign");
-      }
-    }
-
-    async function controlCampaign(action) {
-      try {
-        const res = await fetch('/api/bot-outreach/control', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: action })
-        });
-        const data = await res.json();
-        showToast(`Campaign ${action} command dispatched`);
-        await loadBotOutreachData();
-      } catch (err) {
-        showToast(`Error dispatching ${action}`);
-      }
-    }
-
-    // ==========================================
-    // Multi-Account Management JavaScript
-    // ==========================================
-    let currentLoginToken = null;
-    let allAccounts = [];
-
-    async function loadAccounts() {
+      // 2. Load accounts for rotation badge
       try {
         const res = await fetch('/api/accounts');
         const data = await res.json();
-        allAccounts = data.accounts || [];
-        ['accounts-tab-count', 'accounts-sidebar-count'].forEach(id => {
-          const el = document.getElementById(id);
-          if (el) el.textContent = allAccounts.length;
-        });
+        accountsData = data.accounts || [];
+        const activeAccounts = accountsData.filter(a => a.is_authorized !== false);
 
-        const grid = document.getElementById('accounts-grid');
-        if (!grid) return;
-        grid.innerHTML = '';
+        document.getElementById('rotation-active-count-badge').innerText = `${activeAccounts.length} Accounts Ready`;
+        const listEl = document.getElementById('rotation-accounts-list');
 
-        const accountsBySlot = {};
-        allAccounts.forEach(acc => {
-          accountsBySlot[acc.assigned_slot] = acc;
-        });
-
-        // Always render at least Slots 1 to 5
-        const maxSlot = Math.max(5, ...allAccounts.map(a => a.assigned_slot || 0));
-
-        for (let slot = 1; slot <= maxSlot; slot++) {
-          const acc = accountsBySlot[slot];
-          const card = document.createElement('div');
-
-          if (acc) {
-            const isActive = acc.status === 'active';
-            const isFlood = (acc.status || '').startsWith('flood_wait');
-            const statusColor = isActive ? '#059669' : (isFlood ? '#d97706' : '#dc2626');
-            const statusBg = isActive ? '#d1fae5' : (isFlood ? '#fef3c7' : '#fee2e2');
-
-            card.style.cssText = 'background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-lg); padding:18px; box-shadow:var(--shadow-sm); display:flex; flex-direction:column; justify-content:space-between;';
-            card.innerHTML = `
-              <div>
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                  <span style="font-size:11px; font-weight:700; background:#e0e7ff; color:var(--primary); padding:3px 10px; border-radius:9999px;">
-                    Slot #${slot} • Week ${slot} (Post #${slot})
-                  </span>
-                  <span style="font-size:11px; font-weight:700; background:${statusBg}; color:${statusColor}; padding:2px 8px; border-radius:9999px;">
-                    ${acc.status.toUpperCase()}
-                  </span>
-                </div>
-                <div style="font-size:16px; font-weight:700; color:var(--text-main); margin-bottom:2px;">
-                  ${escapeHtml(acc.phone)}
-                </div>
-                <div style="font-size:13px; color:var(--text-subtle); margin-bottom:8px;">
-                  ${escapeHtml(acc.first_name || '')} ${escapeHtml(acc.last_name || '')} ${acc.username ? `(@${escapeHtml(acc.username)})` : ''}
-                </div>
-                <div style="font-size:11px; color:var(--text-subtle); font-family:monospace; margin-bottom:14px;">
-                  User ID: ${acc.user_id}
-                </div>
-              </div>
-              <div style="display:flex; gap:8px; border-top:1px solid var(--border-subtle); padding-top:12px; margin-top:6px;">
-                <button class="btn btn-outline" style="flex:1; padding:6px; font-size:12px; justify-content:center;" onclick="pingAccount('${acc.phone}', this)">
-                  ⚡ Ping
-                </button>
-                <button class="btn btn-outline" style="padding:6px 10px; font-size:12px; color:#dc2626; border-color:#fca5a5;" onclick="deleteAccount('${acc.phone}')" title="Remove Account">
-                  🗑️
-                </button>
-              </div>
-            `;
-          } else {
-            card.style.cssText = 'background:var(--bg-card-subtle); border:2px dashed var(--border-subtle); border-radius:var(--radius-lg); padding:20px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; min-height:160px;';
-            card.innerHTML = `
-              <div style="font-size:24px; margin-bottom:6px;">📱</div>
-              <div style="font-size:13px; font-weight:700; color:var(--text-main); margin-bottom:2px;">Slot #${slot} Unassigned</div>
-              <div style="font-size:11px; color:var(--text-subtle); margin-bottom:12px;">Assigned to Week ${slot} (Post #${slot})</div>
-              <button class="btn btn-outline" style="font-size:12px; padding:6px 14px;" onclick="openAddAccountModal(${slot})">
-                + Connect Slot #${slot}
-              </button>
-            `;
-          }
-          grid.appendChild(card);
+        if (activeAccounts.length === 0) {
+          listEl.innerHTML = `<div class="p-2 w-full text-xs text-amber-700 bg-amber-50 rounded-lg border border-amber-200 flex items-center justify-between">
+            <span>⚠️ No active Telegram accounts connected!</span>
+            <button onclick="switchTab('tab-accounts')" class="text-xs font-bold underline">Connect Accounts &rarr;</button>
+          </div>`;
+        } else {
+          listEl.innerHTML = activeAccounts.map(a => `
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-white border border-slate-200 text-slate-700 shadow-2xs">
+              <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+              <span>${a.phone}</span>
+            </span>
+          `).join('');
         }
       } catch (e) {
-        console.error("Failed to load accounts", e);
+        console.error('Error loading accounts for sending', e);
       }
     }
 
-    function openAddAccountModal(preselectSlot) {
-      if (!isTelegramConfigured) {
-        showToast("⚠️ Telegram API ID & Hash must be configured first! See the banner on this tab.");
-        const banner = document.getElementById('telegram-config-banner');
-        if (banner) {
-          banner.style.display = 'block';
-          banner.scrollIntoView({ behavior: 'smooth' });
-        }
-        return;
-      }
-      if (preselectSlot) {
-        document.getElementById('acc-slot-select').value = String(preselectSlot);
-      }
-      document.getElementById('account-step-1').style.display = 'block';
-      document.getElementById('account-step-2').style.display = 'none';
-      document.getElementById('acc-phone-input').value = '';
-      document.getElementById('acc-code-input').value = '';
-      document.getElementById('acc-pwd-input').value = '';
-      document.getElementById('modal-add-account').style.display = 'flex';
+    function onTemplateSelected() {
+      const select = document.getElementById('composer-template-select');
+      const id = select.value;
+      if (!id) return;
+      const t = savedTemplates.find(x => x.id === id);
+      if (!t) return;
+
+      document.getElementById('post-title').value = t.title || '';
+      document.getElementById('post-message-text').value = t.message_text || '';
+      document.getElementById('post-image-url').value = t.image_url || '';
+      document.getElementById('post-button-text').value = t.button_text || '';
+      document.getElementById('post-button-url').value = t.button_url || '';
+      updateImagePreview();
+      showToast(`Loaded template: "${t.title}"`, 'info');
     }
 
-    async function saveTelegramConfig() {
-      const apiIdInput = document.getElementById('cfg-api-id').value.trim();
-      const apiHashInput = document.getElementById('cfg-api-hash').value.trim();
-      if (!apiIdInput || !apiHashInput) {
-        showToast("Please enter both API ID and API HASH");
+    async function savePostTemplate() {
+      const title = document.getElementById('post-title').value.trim();
+      const message_text = document.getElementById('post-message-text').value.trim();
+      const image_url = document.getElementById('post-image-url').value.trim();
+      const button_text = document.getElementById('post-button-text').value.trim();
+      const button_url = document.getElementById('post-button-url').value.trim();
+
+      if (!title || !message_text) {
+        alert('Please enter a Title and Message Text to save the template.');
         return;
       }
+
       try {
-        const res = await fetch('/api/config/telegram', {
+        const res = await fetch('/api/posts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ api_id: parseInt(apiIdInput, 10), api_hash: apiHashInput })
+          body: JSON.stringify({ title, message_text, image_url, button_text, button_url })
         });
         const data = await res.json();
-        if (data.success) {
-          showToast("Telegram API credentials saved successfully!");
-          isTelegramConfigured = true;
-          document.getElementById('telegram-config-banner').style.display = 'none';
-          await loadStats();
-          await loadAccounts();
+        if (res.ok) {
+          showToast(`Saved template "${title}" successfully!`, 'success');
+          loadSendingData();
         } else {
-          showToast(data.error || "Failed to save credentials");
+          alert(data.error || 'Failed to save template');
         }
       } catch (e) {
-        showToast("Error saving Telegram credentials");
+        alert('Error: ' + e.message);
       }
     }
 
-    async function clearDemoAccounts() {
-      if (!confirm("Remove mock demo accounts (+1999...) from database?")) return;
+    async function deleteSelectedTemplate() {
+      const select = document.getElementById('composer-template-select');
+      const id = select.value;
+      if (!id) {
+        alert('Please select a saved template from the dropdown first.');
+        return;
+      }
+      if (!confirm('Are you sure you want to delete this template?')) return;
       try {
-        const res = await fetch('/api/accounts/clear-demo', { method: 'POST' });
-        const data = await res.json();
-        showToast(`Cleared ${data.cleared_count || 0} demo accounts!`);
-        await loadAccounts();
+        const res = await fetch(`/api/posts/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          showToast('Template deleted.', 'info');
+          loadSendingData();
+        }
       } catch (e) {
-        showToast("Error clearing demo accounts");
+        alert('Error deleting template');
       }
     }
 
-    function closeAddAccountModal() {
-      document.getElementById('modal-add-account').style.display = 'none';
-      currentLoginToken = null;
-    }
+    async function startManualSending() {
+      const title = document.getElementById('post-title').value.trim() || 'Manual Campaign';
+      const message_text = document.getElementById('post-message-text').value.trim();
+      const image_url = document.getElementById('post-image-url').value.trim();
+      const button_text = document.getElementById('post-button-text').value.trim();
+      const button_url = document.getElementById('post-button-url').value.trim();
+      const target_type = document.querySelector('input[name="sending-target"]:checked').value;
+      const delay_seconds = parseInt(document.getElementById('sending-delay-slider').value, 10) || 15;
+      const max_per_account = parseInt(document.getElementById('sending-max-per-account').value, 10) || 25;
 
-    function resetLoginStep() {
-      document.getElementById('account-step-1').style.display = 'block';
-      document.getElementById('account-step-2').style.display = 'none';
-      currentLoginToken = null;
-      const codeInp = document.getElementById('acc-code-input');
-      const pwdInp = document.getElementById('acc-pwd-input');
-      if (codeInp) codeInp.value = '';
-      if (pwdInp) {
-        pwdInp.value = '';
-        pwdInp.style.borderColor = 'var(--border-subtle)';
-      }
-      const btn = document.getElementById('btn-acc-verify-code');
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = "✅ Verify & Connect Account";
-      }
-    }
-
-    async function submitStartLogin() {
-      const phone = document.getElementById('acc-phone-input').value.trim();
-      const slot = parseInt(document.getElementById('acc-slot-select').value, 10);
-
-      if (!phone) {
-        showToast("Please enter a valid phone number with country code.");
+      if (!message_text) {
+        alert('Please write promotional message text before starting the campaign.');
         return;
       }
 
-      const btn = document.getElementById('btn-acc-send-code');
+      let custom_leads = [];
+      if (target_type === 'custom') {
+        const raw = document.getElementById('custom-handles-text').value;
+        const nl = String.fromCharCode(10);
+        const items = raw.split(',').join(nl).split(nl);
+        custom_leads = items.map(s => {
+          const t = s.trim();
+          return t.startsWith('@') ? t.substring(1) : t;
+        }).filter(Boolean);
+        if (custom_leads.length === 0) {
+          alert('Please enter at least one target handle in the custom list.');
+          return;
+        }
+      }
+
+      if (!confirm(`Launch promotional sending campaign across ${target_type.replace('_', ' ')} with account rotation?`)) return;
+
+      try {
+        const res = await fetch('/api/sending/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            post_title: title,
+            message_text,
+            image_url,
+            button_text,
+            button_url,
+            target_type,
+            custom_leads,
+            delay_seconds,
+            max_per_account
+          })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast('Promotional campaign launched!', 'success');
+          startCampaignPolling();
+        } else {
+          alert(data.error || 'Failed to start campaign');
+        }
+      } catch (e) {
+        alert('Error launching campaign: ' + e.message);
+      }
+    }
+
+    function startCampaignPolling() {
+      if (campaignPollInterval) clearInterval(campaignPollInterval);
+      checkCampaignStatus();
+      campaignPollInterval = setInterval(checkCampaignStatus, 2000);
+    }
+
+    async function checkCampaignStatus() {
+      try {
+        const res = await fetch('/api/sending/status');
+        const st = await res.json();
+
+        // Update progress bar
+        const total = st.total_targets || 0;
+        const sent = st.sent_count || 0;
+        const failed = st.failed_count || 0;
+        const completed = sent + failed;
+        const percent = total > 0 ? Math.round((completed / total) * 100) : (st.status === 'completed' ? 100 : 0);
+
+        document.getElementById('monitor-progress-bar').style.width = percent + '%';
+        document.getElementById('monitor-progress-percent').innerText = percent + '%';
+        document.getElementById('monitor-progress-text').innerText = `${completed} of ${total} Completed`;
+
+        document.getElementById('monitor-stat-total').innerText = total;
+        document.getElementById('monitor-stat-sent').innerText = sent;
+        document.getElementById('monitor-stat-failed').innerText = failed;
+        document.getElementById('monitor-stat-remaining').innerText = Math.max(0, total - completed);
+
+        document.getElementById('monitor-active-account').innerText = st.current_account || 'None';
+        document.getElementById('monitor-active-lead').innerText = st.current_lead || 'None';
+        document.getElementById('monitor-campaign-title').innerText = st.post_title ? `Campaign: ${st.post_title}` : 'Campaign Monitor';
+
+        // Status pill
+        const pill = document.getElementById('monitor-status-pill');
+        const stopBtn = document.getElementById('btn-stop-campaign');
+
+        if (st.is_running) {
+          pill.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700 animate-pulse';
+          pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-blue-600"></span><span>Running</span>';
+          stopBtn.classList.remove('hidden');
+        } else if (st.status === 'completed') {
+          pill.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700';
+          pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-600"></span><span>Completed</span>';
+          stopBtn.classList.add('hidden');
+        } else if (st.status === 'stopped') {
+          pill.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700';
+          pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-600"></span><span>Stopped</span>';
+          stopBtn.classList.add('hidden');
+        } else {
+          pill.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600';
+          pill.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-400"></span><span>Idle</span>';
+          stopBtn.classList.add('hidden');
+        }
+
+        // Live Log Terminal
+        const logs = st.recent_logs || [];
+        const terminal = document.getElementById('monitor-log-terminal');
+        if (logs.length > 0) {
+          terminal.innerHTML = logs.map(l => {
+            let color = 'text-slate-300';
+            if (l.includes('✅') || l.includes('Success')) color = 'text-emerald-400';
+            if (l.includes('❌') || l.includes('Error') || l.includes('Flood')) color = 'text-red-400';
+            if (l.includes('🔄') || l.includes('Rotating')) color = 'text-blue-400';
+            return `<div class="${color}">${l}</div>`;
+          }).join('');
+          terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        if (!st.is_running && campaignPollInterval) {
+          clearInterval(campaignPollInterval);
+          campaignPollInterval = null;
+        }
+      } catch (e) {
+        console.error('Error checking campaign status', e);
+      }
+    }
+
+    async function stopCampaign() {
+      if (!confirm('Are you sure you want to stop the promotional sending campaign?')) return;
+      try {
+        const res = await fetch('/api/sending/stop', { method: 'POST' });
+        if (res.ok) {
+          showToast('Campaign stopped.', 'warning');
+          checkCampaignStatus();
+        }
+      } catch (e) {
+        alert('Error stopping campaign');
+      }
+    }
+
+
+    // --- LOGIN ACCOUNTS SECTION ---
+    async function loadAccounts() {
+      const grid = document.getElementById('accounts-cards-grid');
+      try {
+        const res = await fetch('/api/accounts');
+        const data = await res.json();
+        accountsData = data.accounts || [];
+
+        if (accountsData.length === 0) {
+          grid.innerHTML = `
+            <div class="col-span-full p-8 text-center bg-white rounded-2xl border border-slate-200 space-y-3">
+              <div class="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto text-2xl font-bold">🔑</div>
+              <h4 class="font-display font-bold text-slate-900 text-base">No Sending Accounts Connected</h4>
+              <p class="text-xs text-slate-500 max-w-sm mx-auto">Connect your Telegram user accounts here. The Manual Sending engine uses them to rotate outbound dispatches.</p>
+              <button onclick="openConnectAccountModal()" class="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs shadow-sm hover:bg-blue-700">Connect First Account</button>
+            </div>
+          `;
+          return;
+        }
+
+        grid.innerHTML = accountsData.map(a => {
+          const isAuthed = a.is_authorized !== false;
+          const statusPill = isAuthed
+            ? `<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">🟢 Active & Ready</span>`
+            : `<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-700 border border-red-200">🔴 Needs Re-auth</span>`;
+
+          const name = [a.first_name, a.last_name].filter(Boolean).join(' ') || 'Telegram User';
+          const username = a.username ? `@${a.username}` : 'No username';
+          const sentToday = a.messages_sent_today || 0;
+
+          return `
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 hover:border-slate-300 transition-all">
+              <div class="flex items-start justify-between">
+                <div>
+                  <div class="font-mono font-bold text-slate-900 text-base">${a.phone}</div>
+                  <div class="text-xs text-slate-500 mt-0.5">${name} &bull; <span class="text-blue-600 font-medium">${username}</span></div>
+                </div>
+                <div>${statusPill}</div>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2 text-center p-2.5 bg-slate-50 rounded-xl border border-slate-100 text-xs">
+                <div>
+                  <div class="text-[10px] text-slate-400 font-semibold uppercase">Slot</div>
+                  <div class="font-bold text-slate-800">#${a.slot || 1}</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400 font-semibold uppercase">Sent Today</div>
+                  <div class="font-bold text-blue-600">${sentToday}</div>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-2 pt-1 border-t border-slate-100">
+                <button onclick="pingAccount('${a.phone}')" class="flex-1 py-1.5 px-3 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all">
+                  <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                  <span>Ping Test</span>
+                </button>
+                <button onclick="deleteAccount('${a.phone}')" class="py-1.5 px-3 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 text-xs font-semibold transition-all">
+                  <span>Disconnect</span>
+                </button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (e) {
+        grid.innerHTML = `<div class="col-span-full py-8 text-center text-red-500">Error loading accounts: ${e.message}</div>`;
+      }
+    }
+
+    async function pingAccount(phone) {
+      showToast(`Pinging ${phone}...`, 'info');
+      try {
+        const res = await fetch(`/api/accounts/${phone}/ping`, { method: 'POST' });
+        const data = await res.json();
+        if (data.authorized) {
+          showToast(`Account ${phone} is HEALTHY and AUTHORIZED!`, 'success');
+        } else {
+          showToast(`Account ${phone} ping failed: ${data.error || 'Not authorized'}`, 'error');
+        }
+      } catch (e) {
+        showToast('Ping error: ' + e.message, 'error');
+      }
+    }
+
+    async function deleteAccount(phone) {
+      if (!confirm(`Are you sure you want to disconnect Telegram account ${phone}?`)) return;
+      try {
+        const res = await fetch(`/api/accounts/${phone}`, { method: 'DELETE' });
+        if (res.ok) {
+          showToast(`Disconnected account ${phone}`, 'info');
+          loadAccounts();
+          loadStats();
+        }
+      } catch (e) {
+        showToast('Error removing account', 'error');
+      }
+    }
+
+    // Modal Connect Account
+    function openConnectAccountModal() {
+      document.getElementById('modal-account-phone').value = '';
+      document.getElementById('modal-account-code').value = '';
+      document.getElementById('modal-account-password').value = '';
+      document.getElementById('account-step-1').classList.remove('hidden');
+      document.getElementById('account-step-2').classList.add('hidden');
+      document.getElementById('modal-connect-account').classList.remove('hidden');
+    }
+    function closeConnectAccountModal() {
+      document.getElementById('modal-connect-account').classList.add('hidden');
+    }
+
+    async function submitStartAccountLogin() {
+      const phone = document.getElementById('modal-account-phone').value.trim();
+      if (!phone || !phone.startsWith('+')) {
+        alert('Please enter a valid phone number with international country code (e.g. +919876543210).');
+        return;
+      }
+
+      const btn = document.getElementById('btn-modal-send-code');
       btn.disabled = true;
-      btn.textContent = "⏳ Sending Code...";
+      btn.innerText = 'Requesting code from Telegram...';
 
       try {
         const res = await fetch('/api/accounts/login/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phone, slot: slot })
+          body: JSON.stringify({ phone })
         });
         const data = await res.json();
-        if (data.status === 'code_sent') {
-          currentLoginToken = data.session_token;
-          document.getElementById('acc-display-phone').textContent = data.phone;
-          document.getElementById('account-step-1').style.display = 'none';
-          document.getElementById('account-step-2').style.display = 'block';
-          showToast(data.message || "Verification code sent!");
+        if (res.ok && data.session_token) {
+          pendingLoginToken = data.session_token;
+          document.getElementById('modal-display-phone').innerText = phone;
+          document.getElementById('account-step-1').classList.add('hidden');
+          document.getElementById('account-step-2').classList.remove('hidden');
+          showToast('OTP sent! Check your Telegram app.', 'info');
         } else {
-          showToast(data.error || "Failed to send code.");
+          alert(data.error || 'Failed to send OTP code');
         }
       } catch (e) {
-        showToast("Error contacting server");
+        alert('Error: ' + e.message);
       } finally {
         btn.disabled = false;
-        btn.textContent = "📨 Send Telegram Login Code";
+        btn.innerText = 'Send Telegram OTP Code';
       }
     }
 
-    async function submitCompleteLogin() {
-      const code = document.getElementById('acc-code-input').value.trim();
-      const pwd = document.getElementById('acc-pwd-input').value.trim();
+    async function submitCompleteAccountLogin() {
+      const code = document.getElementById('modal-account-code').value.trim();
+      const password = document.getElementById('modal-account-password').value.trim();
 
-      if (!code && !pwd) {
-        showToast("Please enter verification code");
+      if (!code) {
+        alert('Please enter the verification code from your Telegram app.');
         return;
       }
 
-      const btn = document.getElementById('btn-acc-verify-code');
+      const btn = document.getElementById('btn-modal-complete-login');
       btn.disabled = true;
-      btn.textContent = pwd ? "⏳ Verifying 2FA Password..." : "⏳ Verifying Code...";
+      btn.innerText = 'Authorizing...';
 
       try {
         const res = await fetch('/api/accounts/login/complete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            session_token: currentLoginToken,
-            code: code || null,
-            password: pwd || null
+            session_token: pendingLoginToken,
+            code,
+            password: password || undefined
           })
         });
         const data = await res.json();
-
-        if (data.status === 'requires_password') {
-          showToast("🔐 2FA Cloud Password Required! Please enter your 2FA password.");
-          const pwdInp = document.getElementById('acc-pwd-input');
-          pwdInp.focus();
-          pwdInp.style.borderColor = "var(--primary)";
-          btn.textContent = "🔐 Submit 2FA Cloud Password";
-        } else if (data.status === 'success') {
-          showToast(data.message || "Account connected successfully!");
-          closeAddAccountModal();
-          await loadAccounts();
+        if (data.status === 'success') {
+          showToast('Telegram account connected successfully!', 'success');
+          closeConnectAccountModal();
+          loadAccounts();
+          loadStats();
         } else {
-          showToast(data.error || "Verification failed");
-          if (data.error && (data.error.includes("expired") || data.error.includes("invalidated"))) {
-            setTimeout(() => resetLoginStep(), 2500);
-          }
+          alert(data.error || data.message || 'Verification failed');
         }
       } catch (e) {
-        showToast("Error verifying credentials");
+        alert('Error: ' + e.message);
       } finally {
         btn.disabled = false;
-        if (!document.getElementById('acc-pwd-input').value.trim() && !btn.textContent.includes("2FA")) {
-          btn.textContent = "✅ Verify & Connect Account";
-        }
+        btn.innerText = 'Authorize & Connect Account';
       }
     }
 
-    async function pingAccount(phone, btn) {
-      if (btn) {
-        btn.disabled = true;
-        btn.textContent = "⏳";
-      }
+
+    // --- AUTOMATIC SENDING REPORT SECTION ---
+    async function loadReports() {
+      const statusFilter = document.getElementById('reports-status-filter').value;
+      const tbody = document.getElementById('reports-table-body');
+
+      // 1. Load Analytics Stats
       try {
-        const res = await fetch(`/api/accounts/${encodeURIComponent(phone)}/ping`, { method: 'POST' });
-        const data = await res.json();
-        if (data.status === 'active') {
-          showToast(`Account ${phone} is ONLINE & ACTIVE!`);
+        const res = await fetch('/api/reports/analytics');
+        const analytics = await res.json();
+
+        document.getElementById('report-stat-total').innerText = analytics.total_sent || 0;
+        document.getElementById('report-stat-today').innerText = analytics.sent_today || 0;
+        document.getElementById('report-stat-success-rate').innerText = (analytics.success_rate_percent || 100) + '%';
+        document.getElementById('report-stat-accounts').innerText = Object.keys(analytics.by_account || {}).length;
+
+        // Breakdown by Account table
+        const byAccTbody = document.getElementById('reports-by-account-tbody');
+        const accountsList = Object.entries(analytics.by_account || {});
+        if (accountsList.length === 0) {
+          byAccTbody.innerHTML = `<tr><td colspan="3" class="py-4 text-center text-slate-400">No account dispatches recorded yet.</td></tr>`;
         } else {
-          showToast(`Account ${phone} status: ${data.status} (${data.error || ''})`);
-        }
-        await loadAccounts();
-      } catch (e) {
-        showToast("Error pinging account");
-      } finally {
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "⚡ Ping";
-        }
-      }
-    }
-
-    async function deleteAccount(phone) {
-      if (!confirm(`Are you sure you want to disconnect and remove account ${phone}?`)) {
-        return;
-      }
-      try {
-        const res = await fetch(`/api/accounts/${encodeURIComponent(phone)}`, { method: 'DELETE' });
-        const data = await res.json();
-        if (data.success) {
-          showToast(`Account ${phone} disconnected.`);
-          await loadAccounts();
-        }
-      } catch (e) {
-        showToast("Error deleting account");
-      }
-    }
-
-    // ==========================================
-    // 5-Week Progressive Drip Funnel JavaScript
-    // ==========================================
-
-    async function loadDripOverview() {
-      try {
-        const res = await fetch('/api/drip/overview');
-        const data = await res.json();
-        const funnel = data.funnel || {};
-        const stages = data.stages || [];
-
-        // Update Funnel Stats Chips
-        if (document.getElementById('funnel-total-bots')) document.getElementById('funnel-total-bots').textContent = funnel.total_bots || 0;
-        if (document.getElementById('funnel-pending-w1')) document.getElementById('funnel-pending-w1').textContent = funnel.stage_0_pending || 0;
-        if (document.getElementById('funnel-stage1-sent')) document.getElementById('funnel-stage1-sent').textContent = funnel.stage_1_sent || 0;
-        if (document.getElementById('funnel-stage2-sent')) document.getElementById('funnel-stage2-sent').textContent = funnel.stage_2_sent || 0;
-        if (document.getElementById('funnel-stage3-sent')) document.getElementById('funnel-stage3-sent').textContent = funnel.stage_3_sent || 0;
-        if (document.getElementById('funnel-stage4-sent')) document.getElementById('funnel-stage4-sent').textContent = funnel.stage_4_sent || 0;
-        if (document.getElementById('funnel-stage5-completed')) document.getElementById('funnel-stage5-completed').textContent = funnel.stage_5_completed || 0;
-
-        const totalActiveInFunnel = (funnel.stage_0_pending || 0) + (funnel.stage_1_sent || 0);
-        ['drip-tab-count', 'drip-sidebar-count'].forEach(id => {
-          const el = document.getElementById(id);
-          if (el) el.textContent = totalActiveInFunnel || "5 Stages";
-        });
-
-        const container = document.getElementById('drip-stages-container');
-        if (!container) return;
-        container.innerHTML = '';
-
-        stages.forEach(st => {
-          const card = document.createElement('div');
-          const isReady = st.ready_to_send > 0 && st.has_active_account;
-
-          card.style.cssText = 'background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:var(--radius-lg); padding:20px; box-shadow:var(--shadow-sm); display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:16px;';
-          card.innerHTML = `
-            <div style="flex:1; min-width:300px;">
-              <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
-                <span style="font-size:12px; font-weight:800; background:var(--primary); color:white; padding:3px 10px; border-radius:9999px;">
-                  ${st.week} • Post #${st.post_number}
-                </span>
-                <span style="font-size:15px; font-weight:700; color:var(--text-main);">
-                  ${escapeHtml(st.post_title)}
-                </span>
-                ${st.post_link ? `<a href="${st.post_link}" target="_blank" style="font-size:12px; color:var(--primary); font-weight:600; text-decoration:none;">View Channel Msg ↗</a>` : '<span style="color:#dc2626; font-size:11px; font-weight:600;">(Not Published)</span>'}
-              </div>
-
-              <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:center; font-size:12px; color:var(--text-subtle); margin-top:8px;">
-                <div>
-                  <strong>Assigned Account (Slot #${st.stage}):</strong>
-                  ${st.account_phone ? `<span style="color:var(--text-main); font-weight:600;">${st.account_phone} (${st.account_name})</span>` : '<span style="color:#dc2626; font-weight:600;">No Account Connected</span>'}
-                </div>
-                <div>
-                  <strong>Current Stage Bots:</strong>
-                  <span style="font-weight:700; color:var(--text-main);">${st.leads_in_stage}</span>
-                </div>
-                <div>
-                  <strong>Cooldown Rule:</strong>
-                  <span>${st.stage === 1 ? 'Immediate for new bots' : '7 Days after previous post'}</span>
-                </div>
-              </div>
-            </div>
-
-            <div style="display:flex; align-items:center; gap:12px;">
-              <div style="text-align:right;">
-                <div style="font-size:11px; font-weight:700; color:var(--text-subtle); text-transform:uppercase;">Eligible & Ready</div>
-                <div style="font-size:22px; font-weight:800; color:${st.ready_to_send > 0 ? 'var(--primary)' : 'var(--text-subtle)'};">
-                  ${st.ready_to_send} bots
-                </div>
-              </div>
-
-              <div style="display:flex; align-items:center; gap:6px;">
-                <select id="drip-limit-${st.stage}" style="padding:8px 10px; border:1px solid var(--border-subtle); border-radius:var(--radius-md); font-size:12px; font-weight:600;">
-                  <option value="10">10 bots</option>
-                  <option value="25" selected>25 bots</option>
-                  <option value="50">50 bots</option>
-                </select>
-
-                <button class="btn btn-primary" onclick="runDripStage(${st.stage})" ${isReady ? '' : 'disabled'} style="white-space:nowrap; ${isReady ? '' : 'opacity:0.5; cursor:not-allowed;'}">
-                  🚀 Run Week ${st.stage} Batch
-                </button>
-              </div>
-            </div>
-          `;
-          container.appendChild(card);
-        });
-
-      } catch (e) {
-        console.error("Failed to load drip overview", e);
-      }
-    }
-
-    async function runDripStage(stage) {
-      const limitSelect = document.getElementById(`drip-limit-${stage}`);
-      const limit = limitSelect ? parseInt(limitSelect.value, 10) : 25;
-
-      if (!confirm(`Execute 5-Week Drip for Week #${stage}? This will forward Post #${stage} to up to ${limit} eligible deal bots with an assigned user account.`)) {
-        return;
-      }
-
-      showToast(`Starting Week #${stage} forwarding batch...`);
-
-      try {
-        const res = await fetch('/api/drip/execute-stage', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            stage: stage,
-            batch_size: limit,
-            delay_seconds: 12.0
-          })
-        });
-        const data = await res.json();
-        if (data.status === 'completed') {
-          showToast(`Stage #${stage} complete! Delivered: ${data.successful}, Failed: ${data.failed} (Targeted: ${data.targeted})`);
-          await loadDripOverview();
-        } else {
-          showToast(data.error || "Stage execution failed");
-        }
-      } catch (e) {
-        showToast("Network error executing drip stage");
-      }
-    }
-
-    // ==========================================
-    // Autonomous Keyword Search JavaScript
-    // ==========================================
-
-    let discoveredChannelsDebounceTimer = null;
-    function debounceDiscoveredSearch() {
-      clearTimeout(discoveredChannelsDebounceTimer);
-      discoveredChannelsDebounceTimer = setTimeout(loadDiscoveredChannels, 300);
-    }
-
-    function openAddKeywordModal() {
-      const modal = document.getElementById('modal-add-keyword');
-      if (modal) {
-        modal.style.display = 'flex';
-        const input = document.getElementById('modal-kw-input');
-        if (input) input.focus();
-      }
-    }
-
-    function closeAddKeywordModal() {
-      const modal = document.getElementById('modal-add-keyword');
-      if (modal) modal.style.display = 'none';
-    }
-
-    async function submitAddKeyword() {
-      const kwInput = document.getElementById('modal-kw-input');
-      const catSelect = document.getElementById('modal-kw-category');
-      const kw = kwInput ? kwInput.value.trim() : '';
-      const cat = catSelect ? catSelect.value : 'deals';
-
-      if (!kw) {
-        showToast("Please enter a keyword.");
-        return;
-      }
-
-      try {
-        const res = await fetch('/api/keywords', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ keyword: kw, category: cat })
-        });
-        const data = await res.json();
-        if (data.status === 'success') {
-          showToast(`Added keyword "${kw}" successfully!`);
-          closeAddKeywordModal();
-          if (kwInput) kwInput.value = '';
-          await loadKeywordsData();
-        } else {
-          showToast(data.error || "Failed to add keyword");
-        }
-      } catch (e) {
-        showToast("Network error adding keyword");
-      }
-    }
-
-    async function loadKeywordsData() {
-      try {
-        const res = await fetch('/api/keywords');
-        const data = await res.json();
-        if (data.status !== 'success') return;
-
-        const stats = data.stats || {};
-        const kwActive = document.getElementById('kw-active-count');
-        const kwTotal = document.getElementById('kw-total-count');
-        const kwChannels = document.getElementById('kw-channels-count');
-        const kwLeads = document.getElementById('kw-leads-count');
-        const kwSidebar = document.getElementById('keywords-sidebar-count');
-
-        if (kwActive) kwActive.textContent = stats.active_keywords || 0;
-        if (kwTotal) kwTotal.textContent = `${stats.total_keywords || 0} configured targets`;
-        if (kwChannels) kwChannels.textContent = stats.total_channels_discovered || 0;
-        if (kwLeads) kwLeads.textContent = stats.total_leads_from_keywords || 0;
-        if (kwSidebar) kwSidebar.textContent = stats.total_channels_discovered || 0;
-
-        const tbody = document.getElementById('keywords-table-body');
-        if (!tbody) return;
-
-        const keywords = data.keywords || [];
-        if (keywords.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:30px; color:var(--text-subtle);">No keywords added yet. Click "+ Add Keyword" above.</td></tr>';
-          return;
-        }
-
-        tbody.innerHTML = keywords.map(k => {
-          const lastStr = k.last_searched_at ? new Date(k.last_searched_at).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : 'Never';
-          const isEnabled = k.enabled !== false;
-          const statusBadge = isEnabled 
-            ? `<span class="status-chip chip-active" style="cursor:pointer;" onclick="toggleKeywordStatus('${k.keyword}', false)">🟢 Active</span>`
-            : `<span class="status-chip chip-ignored" style="cursor:pointer;" onclick="toggleKeywordStatus('${k.keyword}', true)">⏸️ Paused</span>`;
-          
-          return `
+          byAccTbody.innerHTML = accountsList.map(([phone, count]) => `
             <tr>
-              <td>
-                <span style="font-weight:700; color:var(--text-main); font-size:14px;">"${k.keyword}"</span>
-              </td>
-              <td>
-                <span class="badge badge-secondary" style="text-transform:uppercase; font-size:10px; font-weight:700;">${k.category || 'deals'}</span>
-              </td>
-              <td><span style="font-weight:700; color:var(--primary);">${k.total_channels_found || 0}</span></td>
-              <td><span style="font-weight:700; color:var(--success);">${k.total_leads_extracted || 0}</span></td>
-              <td><span style="font-size:12px; color:var(--text-subtle);">${lastStr}</span></td>
-              <td>${statusBadge}</td>
-              <td>
-                <div style="display:flex; gap:6px;">
-                  <button class="btn btn-sm btn-outline" style="padding:3px 8px; font-size:11px;" title="Search this keyword immediately" onclick="quickSearchKeyword('${k.keyword}')">⚡ Run</button>
-                  <button class="btn btn-sm btn-outline" style="padding:3px 8px; font-size:11px; color:var(--danger); border-color:#fecaca;" title="Delete keyword" onclick="deleteKeyword('${k.keyword}')">🗑️</button>
-                </div>
-              </td>
+              <td class="py-2.5 px-3 font-mono font-semibold text-slate-800">${phone}</td>
+              <td class="py-2.5 px-3 text-slate-500">Sending Node</td>
+              <td class="py-2.5 px-3 text-right font-bold text-blue-600">${count} msgs</td>
             </tr>
-          `;
-        }).join('');
+          `).join('');
+        }
+
+        // Breakdown by Lead Type
+        const byType = analytics.by_recipient_type || {};
+        const botsCount = byType.userbot || byType.bot || 0;
+        const usersCount = byType.username || byType.user || 0;
+        const totalTyped = botsCount + usersCount;
+        const botPct = totalTyped > 0 ? Math.round((botsCount / totalTyped) * 100) : 0;
+        const userPct = totalTyped > 0 ? Math.round((usersCount / totalTyped) * 100) : 0;
+
+        document.getElementById('breakdown-userbots-count').innerText = `${botsCount} (${botPct}%)`;
+        document.getElementById('breakdown-userbots-bar').style.width = botPct + '%';
+        document.getElementById('breakdown-usernames-count').innerText = `${usersCount} (${userPct}%)`;
+        document.getElementById('breakdown-usernames-bar').style.width = userPct + '%';
 
       } catch (e) {
-        console.error("Error loading keywords:", e);
+        console.error('Error loading report analytics', e);
       }
-    }
 
-    async function toggleKeywordStatus(keyword, enable) {
+      // 2. Load Detailed Reports List
       try {
-        const res = await fetch(`/api/keywords/${encodeURIComponent(keyword)}/toggle`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: enable })
-        });
-        const data = await res.json();
-        if (data.status === 'success') {
-          showToast(`Keyword "${keyword}" ${enable ? 'activated' : 'paused'}.`);
-          await loadKeywordsData();
-        }
-      } catch (e) {
-        showToast("Error updating keyword status");
-      }
-    }
-
-    async function deleteKeyword(keyword) {
-      if (!confirm(`Delete target keyword "${keyword}"?`)) return;
-      try {
-        const res = await fetch(`/api/keywords/${encodeURIComponent(keyword)}`, {
-          method: 'DELETE'
-        });
-        const data = await res.json();
-        if (data.status === 'success') {
-          showToast(`Keyword "${keyword}" deleted.`);
-          await loadKeywordsData();
-        }
-      } catch (e) {
-        showToast("Error deleting keyword");
-      }
-    }
-
-    async function quickSearchKeyword(keyword) {
-      const input = document.getElementById('live-search-input');
-      if (input) input.value = keyword;
-      await executeInstantSearch();
-    }
-
-    async function executeInstantSearch() {
-      const input = document.getElementById('live-search-input');
-      const kw = input ? input.value.trim() : '';
-      if (!kw) {
-        showToast("Please enter a keyword to search.");
-        return;
-      }
-      const limitSelect = document.getElementById('live-search-limit');
-      const limit = limitSelect ? parseInt(limitSelect.value, 10) : 15;
-      const btn = document.getElementById('btn-live-search');
-      const resultsDiv = document.getElementById('live-search-results');
-
-      if (btn) {
-        btn.disabled = true;
-        btn.textContent = "⏳ Searching Telegram MTProto...";
-      }
-      if (resultsDiv) {
-        resultsDiv.style.display = 'block';
-        resultsDiv.innerHTML = `<div style="text-align:center; padding:12px; color:var(--text-subtle);">Connecting to Telegram MTProto and scanning global directory for <b>"${kw}"</b>...</div>`;
-      }
-      showToast(`Searching Telegram global directory for "${kw}"...`);
-
-      try {
-        const res = await fetch('/api/keywords/search-now', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ keyword: kw, limit: limit })
-        });
-        const data = await res.json();
-
-        if (data.status === 'success') {
-          showToast(`Search complete: ${data.channels_found} channels found, ${data.leads_extracted} leads extracted!`);
-          let html = `
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-              <span style="font-weight:700; color:var(--text-main);">Discovered ${data.channels_found} Channels & ${data.leads_extracted} Leads</span>
-              <span style="font-size:12px; color:var(--success); font-weight:700;">✅ Saved to MongoDB</span>
-            </div>
-            <div style="display:flex; flex-direction:column; gap:8px;">
-          `;
-          (data.discovered || []).forEach(c => {
-            const leadsBadges = (c.leads || []).map(l => `<span class="badge ${l.toLowerCase().endsWith('bot') ? 'badge-primary' : 'badge-success'}" style="font-size:11px;">@${l}</span>`).join(' ') || '<span style="font-size:11px; color:var(--text-subtle);">No contact in bio</span>';
-            html += `
-              <div style="background:#fff; border:1px solid var(--border-subtle); border-radius:6px; padding:10px; display:flex; justify-content:space-between; align-items:center;">
-                <div>
-                  <div style="font-weight:600; font-size:13px; color:var(--text-main);">${c.title} ${c.username ? `<a href="https://t.me/${c.username}" target="_blank" style="color:var(--primary); font-size:11px; text-decoration:none;">(@${c.username})</a>` : ''}</div>
-                  <div style="font-size:11px; color:var(--text-subtle); margin-top:2px;">Subscribers: ${c.subscribers ? c.subscribers.toLocaleString() : 'N/A'}</div>
-                </div>
-                <div>${leadsBadges}</div>
-              </div>
-            `;
-          });
-          html += '</div>';
-          if (resultsDiv) resultsDiv.innerHTML = html;
-          await Promise.all([loadKeywordsData(), loadDiscoveredChannels(), loadStats(), loadLeads()]);
-        } else {
-          showToast(data.message || data.error || "Search failed");
-          if (resultsDiv) resultsDiv.innerHTML = `<div style="color:var(--danger); font-size:13px;">Error: ${data.message || data.error || "Search failed"}</div>`;
-        }
-      } catch (e) {
-        showToast("Network error executing search");
-        if (resultsDiv) resultsDiv.innerHTML = `<div style="color:var(--danger); font-size:13px;">Network error during search execution.</div>`;
-      } finally {
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "🔍 Search & Extract Now";
-        }
-      }
-    }
-
-    async function runAutonomousCycleNow() {
-      const btn = document.getElementById('btn-run-auto-cycle');
-      if (btn) {
-        btn.disabled = true;
-        btn.textContent = "⏳ Running Cycle...";
-      }
-      showToast("Starting autonomous discovery cycle across target keywords...");
-      try {
-        const res = await fetch('/api/keywords/autonomous/cycle', { method: 'POST' });
-        const data = await res.json();
-        if (data.status === 'completed') {
-          showToast(`Cycle complete! Discovered ${data.channels_found} channels and ${data.leads_extracted} leads.`);
-          await Promise.all([loadKeywordsData(), loadDiscoveredChannels(), loadStats(), loadLeads()]);
-        } else {
-          showToast(data.message || data.status || "Cycle executed");
-        }
-      } catch (e) {
-        showToast("Error executing autonomous cycle");
-      } finally {
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "⚡ Run Auto-Cycle Now";
-        }
-      }
-    }
-
-    async function loadDiscoveredChannels() {
-      const searchInput = document.getElementById('discovered-channels-search');
-      const search = searchInput ? searchInput.value.trim() : '';
-      const tbody = document.getElementById('discovered-channels-body');
-      if (!tbody) return;
-
-      try {
-        const url = search 
-          ? `/api/keywords/channels?limit=50&search=${encodeURIComponent(search)}`
-          : `/api/keywords/channels?limit=50`;
+        const url = statusFilter ? `/api/reports?status=${statusFilter}&limit=100` : '/api/reports?limit=100';
         const res = await fetch(url);
         const data = await res.json();
-        const channels = data.channels || [];
+        const reports = data.reports || [];
 
-        if (channels.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:30px; color:var(--text-subtle);">No channels discovered yet. Run a search to populate.</td></tr>';
+        if (reports.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="7" class="py-12 text-center text-slate-400">No delivery logs recorded yet. Start a campaign in Manual Sending!</td></tr>`;
           return;
         }
 
-        tbody.innerHTML = channels.map(c => {
-          const userLink = c.username 
-            ? `<a href="https://t.me/${c.username}" target="_blank" style="color:var(--primary); text-decoration:none; font-weight:600;">@${c.username}</a>`
-            : (c.invite_link ? `<a href="${c.invite_link}" target="_blank" style="color:var(--text-subtle); font-size:11px;">Join Link</a>` : '<span style="color:var(--text-subtle); font-size:11px;">Private</span>');
-          const subs = c.subscribers_count ? c.subscribers_count.toLocaleString() : 'N/A';
-          const leadsBadge = c.extracted_leads_count > 0
-            ? `<span class="badge badge-success" style="font-weight:700;">${c.extracted_leads_count} Leads</span>`
-            : `<span style="font-size:11px; color:var(--text-subtle);">0 Leads</span>`;
+        tbody.innerHTML = reports.map(r => {
+          const sentAt = r.sent_at ? r.sent_at.substring(0, 19).replace('T', ' ') : 'Recent';
+          const handle = r.recipient_username || '@unknown';
+          const clean = handle.replace('@', '');
+          const isBot = r.recipient_type === 'userbot' || r.recipient_type === 'bot';
+          const typeBadge = isBot
+            ? `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700">🤖 Bot</span>`
+            : `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-50 text-purple-700">👤 User</span>`;
+
+          const isSuccess = r.status === 'sent';
+          const statusBadge = isSuccess
+            ? `<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">✅ Sent</span>`
+            : `<span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-700 border border-red-200">❌ Failed</span>`;
+
+          const note = isSuccess ? (r.message_snippet || 'Delivered successfully') : (r.error_message || 'Delivery error');
 
           return `
-            <tr>
-              <td>
-                <div style="font-weight:600; color:var(--text-main);">${c.title || 'Untitled'}</div>
-                ${c.bio ? `<div style="font-size:11px; color:var(--text-subtle); max-width:260px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${c.bio}</div>` : ''}
+            <tr class="hover:bg-slate-50/75 transition-all">
+              <td class="py-3 px-6 text-xs text-slate-500 font-mono">${sentAt}</td>
+              <td class="py-3 px-4 font-semibold text-slate-900">
+                <a href="https://t.me/${clean}" target="_blank" class="hover:text-blue-600 hover:underline">${handle}</a>
               </td>
-              <td>${userLink}</td>
-              <td><span class="badge badge-secondary" style="font-weight:600; font-size:11px;">"${c.matching_keyword || ''}"</span></td>
-              <td><span style="font-weight:600; color:var(--text-muted);">${subs}</span></td>
-              <td>${leadsBadge}</td>
-              <td>
-                ${c.username ? `<a href="https://t.me/${c.username}" target="_blank" class="btn btn-sm btn-outline" style="padding:3px 8px; font-size:11px; text-decoration:none;">Open ↗</a>` : '-'}
-              </td>
+              <td class="py-3 px-4">${typeBadge}</td>
+              <td class="py-3 px-4 text-xs font-mono text-slate-700">${r.sender_account_phone || 'Rotated'}</td>
+              <td class="py-3 px-4 text-xs text-slate-700 truncate max-w-[150px]">${r.post_title || 'Promotional Post'}</td>
+              <td class="py-3 px-4">${statusBadge}</td>
+              <td class="py-3 px-6 text-xs text-slate-500 truncate max-w-[200px]" title="${note}">${note}</td>
             </tr>
           `;
         }).join('');
       } catch (e) {
-        console.error("Error loading discovered channels:", e);
+        tbody.innerHTML = `<tr><td colspan="7" class="py-8 text-center text-red-500">Failed to load reports: ${e.message}</td></tr>`;
       }
     }
 
-    // Global fetch interceptor: redirect to login if session expires
-    const _nativeFetch = window.fetch;
-    window.fetch = async function(...args) {
-      const resp = await _nativeFetch.apply(this, args);
-      if (resp && resp.status === 401) {
-        const url = (typeof args[0] === 'string') ? args[0] : (args[0]?.url || '');
-        if (!url.includes('/api/auth/')) {
-          window.location.href = '/login';
-        }
-      }
-      return resp;
-    };
-
-    async function handleDashboardLogout() {
-      try {
-        await fetch('/api/auth/logout', { method: 'POST' });
-      } catch (e) {}
-      window.location.href = '/login';
+    function exportReportsCsv() {
+      const status = document.getElementById('reports-status-filter').value;
+      window.location.href = `/api/reports/export-csv?status=${status}`;
     }
 
-    async function checkAuthSession() {
+
+    // --- GLOBAL STATS & SYNC ---
+    async function loadStats() {
       try {
-        const res = await fetch('/api/auth/status');
+        const res = await fetch('/api/stats');
+        const s = await res.json();
+
+        // Nav Badges
+        document.getElementById('nav-leads-badge').innerText = s.total_leads || 0;
+        document.getElementById('nav-accounts-badge').innerText = `${s.active_accounts || 0} Active`;
+        document.getElementById('nav-reports-badge').innerText = s.total_messages_sent || 0;
+        document.getElementById('top-accounts-status').innerText = `${s.active_accounts || 0} Sending Accounts Ready`;
+
+        // Leads section stats
+        document.getElementById('leads-stat-userbots').innerText = s.userbots_count || 0;
+        document.getElementById('leads-stat-usernames').innerText = s.usernames_count || 0;
+        document.getElementById('leads-stat-contacted').innerText = s.contacted_count || 0;
+        document.getElementById('badge-count-userbots').innerText = s.userbots_count || 0;
+        document.getElementById('badge-count-usernames').innerText = s.usernames_count || 0;
+
+        // Target selector counts
+        document.getElementById('target-count-userbots').innerText = s.userbots_count || 0;
+        document.getElementById('target-count-usernames').innerText = s.usernames_count || 0;
+        document.getElementById('target-count-uncontacted').innerText = s.pending_count || 0;
+
+      } catch (e) {
+        console.error('Error loading global stats', e);
+      }
+    }
+
+    async function triggerSyncNow() {
+      showToast('Initiating external source sync...', 'info');
+      try {
+        const res = await fetch('/api/trigger-sync', { method: 'POST' });
         const data = await res.json();
-        if (!data.authenticated) {
-          window.location.href = '/login';
-        } else if (data.email) {
-          const topEmail = document.getElementById('topbar-user-email');
-          const sideEmail = document.getElementById('sidebar-user-email');
-          if (topEmail) topEmail.textContent = data.email;
-          if (sideEmail) sideEmail.textContent = data.email;
+        if (data.status === 'success') {
+          showToast(`Sync complete! Found ${data.sources_count} source channels.`, 'success');
+          loadLeads();
+          loadStats();
+        } else {
+          showToast(data.message || 'No new channels in this window.', 'info');
         }
-      } catch (e) {}
+      } catch (e) {
+        showToast('Sync error: ' + e.message, 'error');
+      }
     }
 
-    async function loadAll() {
-      await Promise.all([
-        loadStats(),
-        loadLeads(),
-        loadLogs(),
-        loadAccounts(),
-        loadDripOverview(),
-        loadBotOutreachData(),
-        loadKeywordsData(),
-        loadDiscoveredChannels()
-      ]);
-    }
-
-    // Auto-refresh every 20 seconds
+    // INIT
     window.addEventListener('DOMContentLoaded', () => {
-      checkAuthSession();
-      loadAll();
-      setInterval(loadAll, 20000);
+      loadStats();
+      loadLeads();
+      setInterval(loadStats, 20000);
     });
   </script>
 </body>
-</html>
-"""
+</html>"""

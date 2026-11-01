@@ -10,8 +10,8 @@
 ## 📊 Project Status Dashboard
 
 - **Project Name**: Telegram Promotion Tool
-- **Current Phase**: Phase 17 Complete - Dashboard Authentication & MTProto 2FA Login Resilience
-- **Last Updated**: 2026-11-01 19:35 IST
+- **Current Phase**: Phase 18 Complete - Streamlined 4-Section Architecture (Leads, Manual Sending with Account Rotation, Login Accounts, Automatic Sending Report)
+- **Last Updated**: 2026-11-01 20:30 IST
 - **Target Integration**: ProAffiliaters External Sources API (`https://app.proaffiliaters.com`) & Telegram Bot API
 
 ---
@@ -154,6 +154,32 @@
 - [x] Upgrade modal UI in `src/web.py` to highlight 2FA input, update button text to "Submit 2FA Cloud Password", and preserve OTP code input.
 - [x] Create comprehensive automated test suite `testing_files/test_auth_and_account_login.py` (100% passing).
 
+### Phase 18: Complete Rearchitecture into 4 Core Production Sections
+- [x] Approved architectural plan `rearchitecture_plan.md` focusing strictly on promotional sending to extracted leads without bloatware or channel publishing management.
+- [x] Defined Data Models in `src/models.py`:
+  - `PromotionalPost`: post templates (`id`, `title`, `message_text`, `image_url`, `button_text`, `button_url`, `created_at`).
+  - `SendingReport`: delivery logs (`id`, `recipient_username`, `recipient_type`, `sender_account_phone`, `sender_account_name`, `post_title`, `message_snippet`, `status`, `error_message`, `sent_at`).
+  - Added `PENDING` and `REPLIED` to `LeadStatus` enum.
+- [x] Implemented MongoDB Repositories in `src/db.py`:
+  - `promotional_posts` collection: `save_promotional_post`, `get_all_promotional_posts`, `delete_promotional_post`.
+  - `sending_reports` collection: `save_sending_report`, `get_sending_reports`, `get_sending_reports_count`, `get_sending_reports_analytics` (sent today, total sent, success rate, by account, by lead type).
+  - Added `delete_lead(username_clean)` for leads management.
+- [x] Implemented Account Rotation & Delivery Dispatcher Engine (`src/delivery_engine.py`):
+  - Round-robin rotation across active authorized MTProto accounts (`AccountManager.get_client`).
+  - Safe delay pacing (5s - 60s) and human-like delays.
+  - Automatic `FloodWaitError` cooldown handling with seamless fallback to next account in rotation.
+  - Lead segmentation: `all_userbots`, `all_usernames`, `uncontacted`, and `custom` handles list.
+  - Real-time campaign state (`is_running`, progress bar percent, active sender, current lead, live logs).
+- [x] Redesigned Web UI Dashboard (`src/web.py`) with EXACTLY 4 clean sections:
+  - **1. Leads**: Two tabs (`Userbots` vs `Usernames`), real-time search, status filter, inline status updater, manual lead adder modal, and filtered CSV export.
+  - **2. Manual Sending**: Promotional post composer (Markdown support, image preview, custom buttons, save template), target audience selector, account rotation status, delay slider, start campaign CTA, and real-time live dispatch monitor.
+  - **3. Login Accounts**: Telegram MTProto account cards, connection health test ping, disconnect button, and 2-step phone OTP / 2FA login modal with active keepalive.
+  - **4. Automatic Sending Report**: Key performance indicator summary cards, deliveries by account breakdown, target segmentation bars, full audit log table with status filtering, and CSV report export.
+- [x] Created & Verified Automated Test Suites:
+  - `testing_files/test_four_sections_api.py` (100% passing across all endpoints).
+  - `testing_files/verify_sidebar_ui.py` (Playwright automated UI test verifying all 4 sections with 0 console errors).
+  - Saved full UI verification screenshot: `verification_4_sections_ui.png`.
+
 ---
 
 ## 📝 Change & Progress Log
@@ -184,6 +210,7 @@
 | **2026-10-31 09:45 IST** | Antigravity AI | Enhanced VPS deployment automation in `deploy.sh`: `setup_ssl_certbot()` now automatically checks for active Nginx server configuration (`telegramtools-proaffiliaters`) and automatically configures and tests Nginx first before invoking Certbot. This eliminates the `Could not automatically find a matching server block for telegramtools.proaffiliaters.com` error when setting up SSL. Pushed updates to GitHub main. | `deploy.sh`, `implementation.md` |
 | **2026-10-31 09:50 IST** | Antigravity AI | Security Hardening: Removed prefilled demo `value="spushkar812@gmail.com"` and `value="Pushkar@9084"` from HTML login input fields in `src/web.py`. Form inputs now display clean, empty placeholders requiring genuine user input. Dynamic admin email chip population connected via `checkAuthSession()` from `/api/auth/status`. Pushed update to GitHub main. | `src/web.py`, `implementation.md` |
 | **2026-11-01 19:35 IST** | Antigravity AI | Diagnosed and fixed critical JavaScript syntax error in `src/web.py` (`toggleKeywordStatus` string concatenation in `HTML_CONTENT`). The escaped single quotes in the Python multi-line template caused an `Unexpected string` syntax error in the browser, crashing the JS runtime and preventing `switchTab()` from executing (causing all sidebar sections to fail to open). Converted to template literal syntax, added `loadKeywordsData()` trigger on tab switch, verified with Node.js parser (0 errors), and confirmed all 9 sidebar views open with Playwright (`testing_files/verify_sidebar_ui.py`). Pushed to GitHub main (`e995247`). | `src/web.py`, `testing_files/verify_sidebar_ui.py`, `implementation.md` |
+| **2026-11-01 20:30 IST** | Antigravity AI | Complete Rearchitecture into 4 Core Production Sections: Removed channel publishing bloatware and redesigned the entire application into exactly 4 sections: 1. Leads (Userbots & Usernames tabs, search, status updater, CSV export), 2. Manual Sending (post composer with text/image/button, template save, audience selection, round-robin account rotation dispatcher, and live progress monitor), 3. Login Accounts (MTProto accounts grid, health ping, OTP + 2FA modal with active keepalive), 4. Automatic Sending Report (KPI metrics, account breakdown, delivery audit history table, and CSV export). Implemented schemas (`PromotionalPost`, `SendingReport`) in `src/models.py`, MongoDB collections in `src/db.py`, rotation engine `src/delivery_engine.py`, clean Web UI and REST endpoints in `src/web.py`. Verified end-to-end with automated API suite `testing_files/test_four_sections_api.py` and Playwright UI suite `testing_files/verify_sidebar_ui.py` (0 console errors). | `src/models.py`, `src/config.py`, `src/db.py`, `src/delivery_engine.py`, `src/web.py`, `testing_files/verify_sidebar_ui.py`, `testing_files/test_four_sections_api.py`, `implementation.md` |
 
 
 

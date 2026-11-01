@@ -252,13 +252,31 @@ Inspect stored records with mongosh:
 ```javascript
 use telegram_promotion_tool;
 db.leads.find().pretty();
-db.info_bot_users.find().pretty();
-db.info_bot_broadcasts.find().pretty();
-db.published_posts.find().pretty();
-db.bot_campaigns.find().pretty();
 db.telegram_accounts.find().pretty();
-db.search_keywords.find().pretty();
-db.discovered_channels.find().pretty();
+db.promotional_posts.find().pretty();
+db.sending_reports.find().pretty();
 ```
+
+---
+
+## 9. Updating on Production VPS (`telegramtools.proaffiliaters.com`)
+
+To update your VPS server running on Hostinger with the clean 4-section architecture:
+
+```bash
+# SSH into your VPS:
+ssh root@<vps_ip>
+
+# Navigate to the project directory:
+cd /var/www/telegram-promotion-tool  # or your deployment directory
+
+# Pull latest commits from GitHub:
+git pull origin main
+
+# Restart the application with PM2:
+./deploy.sh --quick
+# or: pm2 restart telegram-promotion-tool
+```
+Access the updated dashboard at **`https://telegramtools.proaffiliaters.com`**.
 
 

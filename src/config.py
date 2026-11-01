@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     mongodb_telegram_accounts_collection: str = Field(default="telegram_accounts", alias="MONGODB_TELEGRAM_ACCOUNTS_COLLECTION")
     mongodb_search_keywords_collection: str = Field(default="search_keywords", alias="MONGODB_SEARCH_KEYWORDS_COLLECTION")
     mongodb_discovered_channels_collection: str = Field(default="discovered_channels", alias="MONGODB_DISCOVERED_CHANNELS_COLLECTION")
+    mongodb_promotional_posts_collection: str = Field(default="promotional_posts", alias="MONGODB_PROMOTIONAL_POSTS_COLLECTION")
+    mongodb_sending_reports_collection: str = Field(default="sending_reports", alias="MONGODB_SENDING_REPORTS_COLLECTION")
 
     # Autonomous Telegram Keyword Search
     keyword_search_enabled: bool = Field(default=True, alias="KEYWORD_SEARCH_ENABLED")

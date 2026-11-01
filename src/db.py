@@ -22,6 +22,8 @@ class Database:
     _fallback_telegram_accounts: Dict[str, Dict[str, Any]] = {}
     _fallback_keywords: Dict[str, Dict[str, Any]] = {}
     _fallback_discovered_channels: Dict[int, Dict[str, Any]] = {}
+    _fallback_promotional_posts: Dict[str, Dict[str, Any]] = {}
+    _fallback_sending_reports: List[Dict[str, Any]] = []
 
     @classmethod
     async def connect(cls):
@@ -194,6 +196,20 @@ class Database:
         return None
 
     @classmethod
+    def get_promotional_posts_collection(cls) -> Optional[AsyncIOMotorCollection]:
+        """Returns the promotional_posts collection if connected."""
+        if cls.is_connected and cls.db is not None:
+            return cls.db[settings.mongodb_promotional_posts_collection]
+        return None
+
+    @classmethod
+    def get_sending_reports_collection(cls) -> Optional[AsyncIOMotorCollection]:
+        """Returns the sending_reports collection if connected."""
+        if cls.is_connected and cls.db is not None:
+            return cls.db[settings.mongodb_sending_reports_collection]
+        return None
+
+    @classmethod
     async def _ensure_indexes(cls):
         """Ensures required indexes on all collections."""
         leads_col = cls.get_leads_collection()
@@ -256,6 +272,21 @@ class Database:
             await channels_col.create_index("matching_keyword")
             await channels_col.create_index("discovered_at")
             logger.info("Indexes verified on '%s' collection.", settings.mongodb_discovered_channels_collection)
+
+        # Promotional Posts & Sending Reports Indexes
+        posts_col = cls.get_promotional_posts_collection()
+        if posts_col is not None:
+            await posts_col.create_index("created_at")
+            logger.info("Indexes verified on '%s' collection.", settings.mongodb_promotional_posts_collection)
+
+        reports_col = cls.get_sending_reports_collection()
+        if reports_col is not None:
+            await reports_col.create_index("sent_at")
+            await reports_col.create_index("recipient_username")
+            await reports_col.create_index("recipient_type")
+            await reports_col.create_index("status")
+            await reports_col.create_index("sender_account_phone")
+            logger.info("Indexes verified on '%s' collection.", settings.mongodb_sending_reports_collection)
 
     @classmethod
     async def _seed_default_keywords(cls):
@@ -450,6 +481,23 @@ class Database:
         # Fallback
         if username_clean in cls._fallback_leads:
             cls._fallback_leads[username_clean]["status"] = new_status
+            return True
+        return False
+
+    @classmethod
+    async def delete_lead(cls, username_clean: str) -> bool:
+        """Deletes a lead from MongoDB or fallback store."""
+        leads_col = cls.get_leads_collection()
+        if leads_col is not None:
+            try:
+                res = await leads_col.delete_one({"username_clean": username_clean})
+                return res.deleted_count > 0
+            except Exception as e:
+                logger.error("Error deleting lead in MongoDB: %s", e)
+
+        # Fallback
+        if username_clean in cls._fallback_leads:
+            del cls._fallback_leads[username_clean]
             return True
         return False
 
@@ -1415,5 +1463,258 @@ class Database:
             except Exception:
                 pass
 
+        return stats
+
+    # =========================================================================
+    # Promotional Posts (Create & Manage Posts to Send)
+    # =========================================================================
+
+    @classmethod
+    async def save_promotional_post(cls, post_data: Any) -> str:
+        """Saves or updates a promotional post template."""
+        if hasattr(post_data, "model_dump"):
+            post_data = post_data.model_dump()
+        elif not isinstance(post_data, dict):
+            post_data = dict(post_data)
+
+        col = cls.get_promotional_posts_collection()
+        now = datetime.utcnow()
+        import uuid
+        post_id = post_data.get("id") or str(uuid.uuid4())
+        post_data["id"] = post_id
+        if "created_at" not in post_data:
+            post_data["created_at"] = now
+
+        if col is not None:
+            try:
+                await col.update_one(
+                    {"id": post_id},
+                    {"$set": post_data},
+                    upsert=True
+                )
+                return post_id
+            except Exception as e:
+                logger.error("MongoDB save_promotional_post error: %s", e)
+
+        cls._fallback_promotional_posts[post_id] = post_data
+        return post_id
+
+    @classmethod
+    async def get_all_promotional_posts(cls) -> List[Dict[str, Any]]:
+        """Retrieves all promotional post templates."""
+        col = cls.get_promotional_posts_collection()
+        if col is not None:
+            try:
+                cursor = col.find({}, {"_id": 0}).sort("created_at", -1)
+                return await cursor.to_list(length=100)
+            except Exception as e:
+                logger.error("MongoDB get_all_promotional_posts error: %s", e)
+
+        return sorted(
+            list(cls._fallback_promotional_posts.values()),
+            key=lambda x: x.get("created_at", datetime.min),
+            reverse=True
+        )
+
+    @classmethod
+    async def get_promotional_post_by_id(cls, post_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a single promotional post by ID."""
+        col = cls.get_promotional_posts_collection()
+        if col is not None:
+            try:
+                return await col.find_one({"id": post_id}, {"_id": 0})
+            except Exception as e:
+                logger.error("MongoDB get_promotional_post_by_id error: %s", e)
+
+        return cls._fallback_promotional_posts.get(post_id)
+
+    @classmethod
+    async def delete_promotional_post(cls, post_id: str) -> bool:
+        """Deletes a promotional post template."""
+        col = cls.get_promotional_posts_collection()
+        if col is not None:
+            try:
+                res = await col.delete_one({"id": post_id})
+                return res.deleted_count > 0
+            except Exception as e:
+                logger.error("MongoDB delete_promotional_post error: %s", e)
+
+        if post_id in cls._fallback_promotional_posts:
+            del cls._fallback_promotional_posts[post_id]
+            return True
+        return False
+
+    # =========================================================================
+    # Automatic Sending Reports (Delivery Audit Logs & Analytics)
+    # =========================================================================
+
+    @classmethod
+    async def save_sending_report(cls, report_data: Any) -> bool:
+        """Saves a delivery report log entry."""
+        if hasattr(report_data, "model_dump"):
+            report_data = report_data.model_dump()
+        elif not isinstance(report_data, dict):
+            report_data = dict(report_data)
+
+        col = cls.get_sending_reports_collection()
+        now = datetime.utcnow()
+        import uuid
+        if "id" not in report_data or not report_data["id"]:
+            report_data["id"] = str(uuid.uuid4())
+        if "sent_at" not in report_data:
+            report_data["sent_at"] = now
+
+        if col is not None:
+            try:
+                await col.insert_one(report_data)
+                return True
+            except Exception as e:
+                logger.error("MongoDB save_sending_report error: %s", e)
+
+        cls._fallback_sending_reports.insert(0, report_data)
+        if len(cls._fallback_sending_reports) > 500:
+            cls._fallback_sending_reports.pop()
+        return True
+
+    @classmethod
+    async def get_sending_reports(
+        cls,
+        limit: int = 50,
+        skip: int = 0,
+        search: Optional[str] = None,
+        status: Optional[str] = None,
+        recipient_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Queries sending report logs with filtering and pagination."""
+        col = cls.get_sending_reports_collection()
+        query: Dict[str, Any] = {}
+        if status and status != "all":
+            query["status"] = status
+        if recipient_type and recipient_type != "all":
+            query["recipient_type"] = recipient_type
+        if search:
+            query["$or"] = [
+                {"recipient_username": {"$regex": search, "$options": "i"}},
+                {"sender_account_phone": {"$regex": search, "$options": "i"}},
+                {"post_title": {"$regex": search, "$options": "i"}}
+            ]
+
+        if col is not None:
+            try:
+                cursor = col.find(query, {"_id": 0}).sort("sent_at", -1).skip(skip).limit(limit)
+                return await cursor.to_list(length=limit)
+            except Exception as e:
+                logger.error("MongoDB get_sending_reports error: %s", e)
+
+        results = cls._fallback_sending_reports
+        if status and status != "all":
+            results = [r for r in results if r.get("status") == status]
+        if recipient_type and recipient_type != "all":
+            results = [r for r in results if r.get("recipient_type") == recipient_type]
+        if search:
+            s_low = search.lower()
+            results = [
+                r for r in results
+                if s_low in r.get("recipient_username", "").lower()
+                or s_low in r.get("sender_account_phone", "").lower()
+                or s_low in r.get("post_title", "").lower()
+            ]
+        return results[skip : skip + limit]
+
+    @classmethod
+    async def get_sending_reports_count(
+        cls,
+        search: Optional[str] = None,
+        status: Optional[str] = None,
+        recipient_type: Optional[str] = None
+    ) -> int:
+        """Returns count of matching sending report logs."""
+        col = cls.get_sending_reports_collection()
+        query: Dict[str, Any] = {}
+        if status and status != "all":
+            query["status"] = status
+        if recipient_type and recipient_type != "all":
+            query["recipient_type"] = recipient_type
+        if search:
+            query["$or"] = [
+                {"recipient_username": {"$regex": search, "$options": "i"}},
+                {"sender_account_phone": {"$regex": search, "$options": "i"}},
+                {"post_title": {"$regex": search, "$options": "i"}}
+            ]
+
+        if col is not None:
+            try:
+                return await col.count_documents(query)
+            except Exception as e:
+                logger.error("MongoDB get_sending_reports_count error: %s", e)
+
+        return len(cls._fallback_sending_reports)
+
+    @classmethod
+    async def get_sending_reports_analytics(cls) -> Dict[str, Any]:
+        """Calculates executive delivery analytics and breakdown stats."""
+        col = cls.get_sending_reports_collection()
+        now = datetime.utcnow()
+        from datetime import timedelta
+        start_of_today = datetime(now.year, now.month, now.day)
+        start_of_week = now - timedelta(days=7)
+
+        stats = {
+            "total_sent": 0,
+            "total_failed": 0,
+            "sent_today": 0,
+            "sent_this_week": 0,
+            "by_lead_type": {"userbot": 0, "username": 0},
+            "by_account": [],
+            "recent_activity": []
+        }
+
+        if col is not None:
+            try:
+                stats["total_sent"] = await col.count_documents({"status": "sent"})
+                stats["total_failed"] = await col.count_documents({"status": {"$ne": "sent"}})
+                stats["sent_today"] = await col.count_documents({"status": "sent", "sent_at": {"$gte": start_of_today}})
+                stats["sent_this_week"] = await col.count_documents({"status": "sent", "sent_at": {"$gte": start_of_week}})
+
+                # Breakdown by lead type
+                userbots_count = await col.count_documents({"recipient_type": "userbot", "status": "sent"})
+                usernames_count = await col.count_documents({"recipient_type": "username", "status": "sent"})
+                stats["by_lead_type"] = {"userbot": userbots_count, "username": usernames_count}
+
+                # Breakdown by account via aggregation
+                pipeline = [
+                    {"$match": {"status": "sent"}},
+                    {"$group": {
+                        "_id": "$sender_account_phone",
+                        "sender_name": {"$first": "$sender_account_name"},
+                        "count": {"$sum": 1}
+                    }},
+                    {"$sort": {"count": -1}},
+                    {"$limit": 10}
+                ]
+                acc_agg = await col.aggregate(pipeline).to_list(length=10)
+                stats["by_account"] = [
+                    {"phone": item["_id"], "name": item.get("sender_name") or item["_id"], "count": item["count"]}
+                    for item in acc_agg if item["_id"]
+                ]
+
+                # Recent activity
+                stats["recent_activity"] = await col.find({}, {"_id": 0}).sort("sent_at", -1).limit(6).to_list(length=6)
+                return stats
+            except Exception as e:
+                logger.error("MongoDB get_sending_reports_analytics error: %s", e)
+
+        # Fallback in-memory calculation
+        reports = cls._fallback_sending_reports
+        sent_reports = [r for r in reports if r.get("status") == "sent"]
+        stats["total_sent"] = len(sent_reports)
+        stats["total_failed"] = len([r for r in reports if r.get("status") != "sent"])
+        stats["sent_today"] = len([r for r in sent_reports if r.get("sent_at", datetime.min) >= start_of_today])
+        stats["sent_this_week"] = len([r for r in sent_reports if r.get("sent_at", datetime.min) >= start_of_week])
+        stats["by_lead_type"] = {
+            "userbot": len([r for r in sent_reports if r.get("recipient_type") == "userbot"]),
+            "username": len([r for r in sent_reports if r.get("recipient_type") == "username"])
+        }
+        stats["recent_activity"] = reports[:6]
         return stats
 

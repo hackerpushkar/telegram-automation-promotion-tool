@@ -243,6 +243,37 @@ Tracks users who started `@ProaffiliatersInfoBot`.
 }
 ```
 
+#### Collection 6: `promotional_posts` (Saved Promotional Post Templates)
+```json
+{
+  "_id": "ObjectId('...')",
+  "id": "6bcb7322-e6ba-436a-9bdd-a849b22f6dd3",
+  "title": "Welcome Affiliate Offer",
+  "message_text": "Join *ProAffiliaters* today for 50% commission rev-share!",
+  "image_url": "https://app.proaffiliaters.com/hero.png",
+  "button_text": "Sign Up",
+  "button_url": "https://app.proaffiliaters.com",
+  "created_at": "2026-11-01T20:25:00.000Z"
+}
+```
+
+#### Collection 7: `sending_reports` (Delivery Audit Logs & Analytics)
+```json
+{
+  "_id": "ObjectId('...')",
+  "id": "a1b2c3d4-e5f6-4a5b-9c8d-7e6f5a4b3c2d",
+  "recipient_username": "@deal_robot",
+  "recipient_type": "userbot",
+  "sender_account_phone": "+919876543210",
+  "sender_account_name": "ProAffiliaters Dispatch Node 1",
+  "post_title": "Welcome Affiliate Offer",
+  "message_snippet": "Join *ProAffiliaters* today...",
+  "status": "sent",
+  "error_message": null,
+  "sent_at": "2026-11-01T20:26:00.000Z"
+}
+```
+
 ---
 
 ## 7. Project Structure
@@ -256,48 +287,55 @@ Telegram Promotion Tool/
 ├── setup.md                   # Installation & setup guide
 ├── .env.example               # Environment variables template
 ├── requirements.txt           # Python dependencies
-├── promotion images and text/ # 5 HD Banners & Smart Ad Copy texts
-│   ├── 1st Image.png ... 5th Image.png
-│   └── 1st Text.txt ... 5th Text.txt
 ├── scripts/
-│   ├── login_account.py       # Interactive CLI wizard to log in unlimited Telegram accounts
-│   ├── publish_now.py         # Batch publishes 5 promo posts to @pro_affiliaters
-│   └── edit_post2.py          # Edits live post captions on Telegram channel
+│   └── build_full_web.py      # Production Web UI assembler & verification script
 ├── src/
 │   ├── __init__.py
 │   ├── config.py              # Settings loaded from environment
-│   ├── db.py                  # MongoDB connection, collections, indexes, & stage queries
-│   ├── models.py              # Pydantic data models for leads, posts, campaigns, & accounts
+│   ├── db.py                  # MongoDB connection, collections, indexes, & analytics queries
+│   ├── models.py              # Pydantic data models for leads, posts, reports, & accounts
 │   ├── api_client.py          # ProAffiliaters external source API sync
 │   ├── scanner.py             # Telethon MTProto bio resolver & fetcher
 │   ├── extractor.py           # Regex parser & user/bot classifier
-│   ├── channel_publisher.py   # Publishes posts to @pro_affiliaters with deep-link buttons
-│   ├── bot_forwarder.py       # Telethon forwarder engine to deal contact bots
 │   ├── account_manager.py     # Multi-account login manager (phone, OTP, 2FA, StringSession)
-│   ├── drip_engine.py         # 5-Week progressive drip campaign engine (Accounts 1-5 rotation)
-│   ├── info_bot.py            # Official Info Bot (@ProaffiliatersInfoBot) engine
+│   ├── delivery_engine.py     # Account rotation & campaign dispatch engine
+│   ├── auth.py                # HMAC-SHA256 session token authenticator
 │   ├── web.py                 # Pure Light Mode Web UI dashboard & REST API
-│   └── main.py                # Scheduler, daemon, info bot, forwarder & web server
+│   └── main.py                # Scheduler, daemon, & web server
 └── testing_files/
-    ├── test_lead_extractor.py # Tests regex lead extraction & user/bot logic
-    ├── test_info_bot.py       # Tests Info Bot parsing, API getMe, & MongoDB persistence
-    ├── test_bot_forwarder.py  # Tests channel publisher, forwarder engine, & database operations
-    └── test_multi_account_drip.py # Tests multi-account CRUD, 5-week stage progression & cooldown
+    ├── test_four_sections_api.py      # Tests REST APIs across all 4 production sections
+    ├── test_auth_and_account_login.py # Tests session auth, security, and account connection
+    └── verify_sidebar_ui.py           # Playwright UI automated test across the 4 sections
 ```
 
 ---
 
-## 8. Web UI Dashboard & REST APIs (Premium ProAffiliaters Sidebar Layout)
+## 8. Web UI Dashboard & Core 4-Section Architecture
 
-The dashboard provides a SaaS desktop application layout modeled directly after the ProAffiliaters Web Application:
-- **Dashboard URL**: `http://localhost:8000`
-- **Theme & Architecture**:
-  - **Left Fixed Sidebar** (270px width): Houses the ProAffiliaters brand mark, grouped navigation (`Core Pipeline`, `Outreach & Campaigns`, `Tools & System`), active indicators, dynamic badge counters, and live API connectivity card.
-  - **Sticky Top Bar**: Displays live breadcrumb tracking (`ProAffiliaters / View`), mobile responsive drawer toggle, 30m auto-sync status chip, and instant sync trigger buttons.
-  - **Responsive Design**: Auto-collapsing drawer on screens `< 1024px` with backdrop blur.
-- **Dedicated Consoles**:
-  - `📋 Extracted Leads`: Filterable directory with search, user vs. bot pills, status dropdowns, and CSV exporter.
-  - `🔑 Telegram Accounts`: Multi-account slot manager (Slots 1-5), in-app MTProto credential setup, and interactive phone/OTP/2FA authorization.
+The dashboard is structured around **EXACTLY 4 Production Sections**, completely dedicated to promotional outreach to leads without channel management bloatware:
+
+- **Dashboard URL**: `https://telegramtools.proaffiliaters.com` (or `http://localhost:8000` locally)
+- **Authentication**: Secured with HMAC-SHA256 session tokens (`spushkar812@gmail.com` / `Pushkar@9084`).
+- **Clean Sidebar Layout**:
+  1. 👥 **Leads**:
+     - Two distinct sub-tabs: `🤖 Userbots` (deal bots) and `👤 Usernames` (human channel owners/admins).
+     - Live search by handle or origin, status filter dropdown, inline one-click status updater, `➕ Add Lead` manual modal, and filtered CSV export.
+  2. ✉️ **Manual Sending**:
+     - Post Composer: compose promotional post with title, markdown message text, optional image URL (with instant preview), and custom inline button text & target URL.
+     - Save as Post Template button and saved templates loader dropdown.
+     - Target Audience Selector: `All Userbots`, `All Usernames`, `Uncontacted Leads Only`, or `Custom Handles List`.
+     - Account Rotation Status: lists all connected active Telegram accounts that will rotate sequentially (round-robin).
+     - Pacing Controls: human-like delay slider (5s to 60s) and max dispatches per account before rotating.
+     - Live Dispatch Monitor: animated real-time progress bar, delivery counts (sent/failed/remaining), active sender phone, target handle, and live scrolling log console.
+  3. 🔑 **Login Accounts**:
+     - Grid of connected Telegram MTProto sending accounts with phone, name, username, sent today counter, and status chip (`🟢 Active` / `⏳ Flood Cooldown`).
+     - Account Health Test (`📶 Ping Test`) and Disconnect action.
+     - 2-Step interactive login modal (Phone -> Telegram OTP Code -> 2FA Cloud Password with active keepalive socket).
+  4. 📊 **Automatic Sending Report**:
+     - High-level KPI metric cards: Total Messages Sent, Sent Today, Delivery Success Rate (%), and Active Senders.
+     - Visual breakdown cards: Deliveries by Sender Account and Target Segmentation (Userbots vs Usernames).
+     - Complete Delivery History Table with timestamp, recipient handle, lead type, sender phone, post title, delivery status, and notes/snippets.
+     - `📥 Export Audit CSV` button for offline reporting.
   - `📆 5-Week Drip Funnel`: Progressive weekly drip automation with funnel chips, stage cooldown enforcement, and batch execution.
   - `🚀 Bot Outreach`: Promotional post publisher (Posts 1-5) and campaign pacing forwarder.
   - `🤖 Info Bot & Ads`: User registration table, attribution tags, and admin WYSIWYG broadcast console.

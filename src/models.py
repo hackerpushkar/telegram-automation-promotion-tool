@@ -11,7 +11,9 @@ class LeadType(str, Enum):
 
 class LeadStatus(str, Enum):
     NEW = "new"
+    PENDING = "pending"
     CONTACTED = "contacted"
+    REPLIED = "replied"
     CONVERTED = "converted"
     IGNORED = "ignored"
 
@@ -178,5 +180,33 @@ class DiscoveredChannel(BaseModel):
     status: str = "scanned"  # discovered, scanned, ignored
     discovered_at: datetime = Field(default_factory=datetime.utcnow)
     last_scanned_at: Optional[datetime] = None
+
+
+# ==========================================
+# Promotional Posts & Sending Delivery Reports
+# ==========================================
+
+class PromotionalPost(BaseModel):
+    id: Optional[str] = None
+    title: str
+    message_text: str
+    image_url: Optional[str] = None
+    button_text: Optional[str] = None
+    button_url: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SendingReport(BaseModel):
+    id: Optional[str] = None
+    recipient_username: str
+    recipient_type: str = "userbot"  # userbot or username
+    sender_account_phone: str
+    sender_account_name: Optional[str] = None
+    post_title: str
+    message_snippet: str
+    status: str = "sent"  # sent, failed, floodwait
+    error_message: Optional[str] = None
+    sent_at: datetime = Field(default_factory=datetime.utcnow)
+
 
 
