@@ -118,6 +118,10 @@ class CompleteAccountLoginRequest(BaseModel):
     code: Optional[str] = None
     password: Optional[str] = None
 
+class TelegramApiConfigRequest(BaseModel):
+    api_id: int
+    api_hash: Optional[str] = ""
+
 class ScanTestRequest(BaseModel):
     bio_text: str
     channel_name: Optional[str] = "Manual Test Channel"
@@ -451,6 +455,71 @@ async def clear_demo_accounts_endpoint():
                 cleared += 1
     log_activity(f"Cleared {cleared} demo Telegram accounts from database.", "info")
     return {"success": True, "cleared_count": cleared}
+
+@app.get("/api/config/telegram")
+async def get_telegram_config():
+    """Returns the current Telegram API config status."""
+    is_set = bool(settings.telegram_api_id and settings.telegram_api_hash)
+    masked_hash = ""
+    if settings.telegram_api_hash:
+        h = str(settings.telegram_api_hash).strip()
+        masked_hash = h[:4] + "•" * max(0, len(h) - 8) + h[-4:] if len(h) >= 8 else "••••••••"
+    return {
+        "configured": is_set,
+        "api_id": settings.telegram_api_id or "",
+        "api_hash_masked": masked_hash
+    }
+
+@app.post("/api/config/telegram")
+async def save_telegram_config(req: TelegramApiConfigRequest):
+    """Saves Telegram MTProto API ID and Hash into settings and .env."""
+    if not req.api_id:
+        return JSONResponse(status_code=400, content={"error": "API ID is required."})
+
+    clean_hash = (req.api_hash or "").strip()
+    if not clean_hash and settings.telegram_api_hash:
+        clean_hash = settings.telegram_api_hash
+    elif not clean_hash:
+        return JSONResponse(status_code=400, content={"error": "Telegram API Hash is required."})
+
+    try:
+        req_api_id = int(req.api_id)
+    except (ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "API ID must be a valid integer."})
+
+    settings.telegram_api_id = req_api_id
+    settings.telegram_api_hash = clean_hash
+
+    # Persist to .env
+    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    try:
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        new_lines = []
+        id_set = False
+        hash_set = False
+        for line in lines:
+            if line.startswith("TELEGRAM_API_ID="):
+                new_lines.append(f"TELEGRAM_API_ID={req_api_id}\n")
+                id_set = True
+            elif line.startswith("TELEGRAM_API_HASH="):
+                new_lines.append(f"TELEGRAM_API_HASH={clean_hash}\n")
+                hash_set = True
+            else:
+                new_lines.append(line)
+        if not id_set:
+            new_lines.append(f"TELEGRAM_API_ID={req_api_id}\n")
+        if not hash_set:
+            new_lines.append(f"TELEGRAM_API_HASH={clean_hash}\n")
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        logger.error(f"Error persisting credentials to .env: {e}")
+
+    log_activity(f"Configured Telegram API ID ({req_api_id}) and API Hash.", "sync")
+    return {"success": True, "message": "Telegram API ID and Hash updated successfully!", "configured": True}
 
 # 6. Section 4: Automatic Sending Report
 @app.get("/api/reports/analytics")
@@ -1565,7 +1634,13 @@ HTML_CONTENT = """<!DOCTYPE html>
               <p class="text-sm text-slate-500 mt-1">Connect and monitor Telegram MTProto accounts used for distributing promotional messages via account rotation.</p>
             </div>
 
-            <div>
+            <div class="flex items-center gap-3">
+              <button onclick="openApiConfigModal()" class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-slate-200/90 text-slate-700 hover:bg-slate-50 hover:border-slate-300 text-xs font-bold shadow-xs transition-all active:scale-95">
+                <svg class="w-4 h-4 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                <span>Telegram API Keys</span>
+                <span id="api-status-chip" class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-50 text-amber-700 border border-amber-200/60">Checking...</span>
+              </button>
+
               <button onclick="openConnectAccountModal()" class="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm shadow-indigo-500/25 transition-all active:scale-95">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                 <span>Connect Telegram Account</span>
@@ -1799,6 +1874,62 @@ HTML_CONTENT = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- MODAL: CONFIGURE TELEGRAM API CREDENTIALS -->
+  <div id="modal-api-config" class="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-white w-full max-w-lg rounded-3xl border border-slate-200 shadow-2xl p-7 space-y-5">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center text-lg">🔑</div>
+          <div>
+            <h3 class="font-display font-extrabold text-lg text-slate-900">Telegram API Credentials</h3>
+            <p class="text-xs text-slate-500">Required by MTProto to log into Telegram accounts</p>
+          </div>
+        </div>
+        <button onclick="closeApiConfigModal()" class="text-slate-400 hover:text-slate-600 text-2xl font-bold">&times;</button>
+      </div>
+
+      <div class="space-y-4">
+        <!-- API ID -->
+        <div>
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">
+            Telegram API ID <span class="text-red-500">*</span>
+          </label>
+          <input id="modal-api-id" type="number" placeholder="e.g. 29384812" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </div>
+
+        <!-- API Hash -->
+        <div>
+          <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">
+            Telegram API Hash <span class="text-red-500">*</span>
+          </label>
+          <input id="modal-api-hash" type="text" placeholder="e.g. 8b4c2e6f9a0d1b3c4e5f6a7b8c9d0e1f" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </div>
+
+        <!-- Guide box -->
+        <div class="p-4 bg-indigo-50/70 border border-indigo-100 rounded-2xl space-y-1.5 text-xs text-indigo-950">
+          <div class="font-bold flex items-center gap-1.5">
+            <span>ℹ️ How to get your Telegram API keys:</span>
+          </div>
+          <ol class="list-decimal list-inside space-y-1 text-[11px] text-indigo-900 font-medium pl-1">
+            <li>Visit <a href="https://my.telegram.org" target="_blank" class="underline font-bold text-indigo-600 hover:text-indigo-800">my.telegram.org</a> and sign in with your phone number.</li>
+            <li>Go to <strong>API development tools</strong>.</li>
+            <li>Copy your <strong>App api_id</strong> and <strong>App api_hash</strong> and paste them here.</li>
+          </ol>
+        </div>
+
+        <div class="pt-2 flex items-center gap-3">
+          <button type="button" onclick="closeApiConfigModal()" class="flex-1 py-3 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 font-bold text-xs transition-all">
+            Cancel
+          </button>
+          <button id="btn-save-api-config" type="button" onclick="submitApiConfig()" class="flex-1 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm shadow-indigo-500/25 flex items-center justify-center gap-2 transition-all active:scale-95">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+            <span>Save & Apply Credentials</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 
   <!-- CLIENT JAVASCRIPT -->
   <script>
@@ -1811,6 +1942,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     let campaignPollInterval = null;
     let pendingLoginToken = null;
     let searchDebounceTimer = null;
+    let isTelegramConfigured = false;
 
     // Toast Notification Utility
     function showToast(message, type = 'info') {
@@ -2373,19 +2505,47 @@ HTML_CONTENT = """<!DOCTYPE html>
         const data = await res.json();
         accountsData = data.accounts || [];
 
+        let warningBanner = '';
+        if (!isTelegramConfigured) {
+          warningBanner = `
+            <div class="col-span-full p-4.5 bg-amber-50 border border-amber-200/90 rounded-3xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xs">
+              <div class="flex items-center gap-3.5">
+                <div class="w-10 h-10 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center text-xl shrink-0">⚠️</div>
+                <div>
+                  <div class="text-xs font-bold text-amber-900">Telegram API ID & API Hash Not Configured</div>
+                  <div class="text-[11px] text-amber-700 font-medium mt-0.5">MTProto requires an API ID and Hash before accounts can connect. Click to enter your keys.</div>
+                </div>
+              </div>
+              <button onclick="openApiConfigModal()" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-xs shrink-0 transition-all active:scale-95 flex items-center gap-1.5 self-start sm:self-auto">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                <span>Configure API Keys Now</span>
+              </button>
+            </div>
+          `;
+        }
+
         if (accountsData.length === 0) {
-          grid.innerHTML = `
+          grid.innerHTML = warningBanner + `
             <div class="col-span-full p-12 text-center bg-white rounded-3xl border border-slate-200/80 space-y-4 shadow-card">
               <div class="w-14 h-14 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mx-auto text-2xl font-bold">🔑</div>
               <h4 class="font-display font-extrabold text-slate-900 text-lg">No Sending Accounts Connected</h4>
               <p class="text-xs text-slate-500 max-w-sm mx-auto font-medium">Connect your Telegram user accounts here. The Manual Sending engine uses them to rotate outbound messages safely.</p>
-              <button onclick="openConnectAccountModal()" class="px-5 py-2.5 rounded-xl bg-indigo-600 text-white font-bold text-xs shadow-sm shadow-indigo-500/25 hover:bg-indigo-700">Connect First Account</button>
+              <div class="flex flex-wrap items-center justify-center gap-3 pt-2">
+                <button onclick="openApiConfigModal()" class="px-5 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-xs shadow-xs transition-all flex items-center gap-1.5 active:scale-95">
+                  <svg class="w-4 h-4 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                  <span>Telegram API Keys</span>
+                </button>
+                <button onclick="openConnectAccountModal()" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm shadow-indigo-500/25 transition-all flex items-center gap-1.5 active:scale-95">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                  <span>Connect First Account</span>
+                </button>
+              </div>
             </div>
           `;
           return;
         }
 
-        grid.innerHTML = accountsData.map(a => {
+        grid.innerHTML = warningBanner + accountsData.map(a => {
           const isAuthed = a.is_authorized !== false;
           const statusPill = isAuthed
             ? `<span class="px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/70">🟢 Active</span>`
@@ -2462,8 +2622,83 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
     }
 
+    // Modal: Telegram API Config
+    async function openApiConfigModal() {
+      document.getElementById('modal-api-config').classList.remove('hidden');
+      try {
+        const res = await fetch('/api/config/telegram');
+        const data = await res.json();
+        if (data.api_id) {
+          document.getElementById('modal-api-id').value = data.api_id;
+        }
+        if (data.configured) {
+          document.getElementById('modal-api-hash').value = '';
+          document.getElementById('modal-api-hash').placeholder = 'Configured (' + data.api_hash_masked + ') - leave blank to keep current';
+        } else {
+          document.getElementById('modal-api-hash').value = '';
+          document.getElementById('modal-api-hash').placeholder = 'e.g. 8b4c2e6f9a0d1b3c4e5f6a7b8c9d0e1f';
+        }
+      } catch (e) {
+        console.error('Error fetching Telegram API config', e);
+      }
+    }
+
+    function closeApiConfigModal() {
+      document.getElementById('modal-api-config').classList.add('hidden');
+    }
+
+    async function submitApiConfig() {
+      const apiIdInput = document.getElementById('modal-api-id').value.trim();
+      const apiHashInput = document.getElementById('modal-api-hash').value.trim();
+      const btn = document.getElementById('btn-save-api-config');
+
+      if (!apiIdInput) {
+        showToast('Please enter your Telegram API ID', 'error');
+        return;
+      }
+
+      const numId = parseInt(apiIdInput, 10);
+      if (isNaN(numId) || numId <= 0) {
+        showToast('Telegram API ID must be a valid positive number', 'error');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '<span>Saving & Testing...</span>';
+
+      try {
+        const res = await fetch('/api/config/telegram', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_id: numId, api_hash: apiHashInput })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          showToast(data.message || 'Telegram API credentials updated successfully!', 'success');
+          closeApiConfigModal();
+          await loadStats();
+          await loadAccounts();
+        } else {
+          showToast(data.error || 'Failed to save Telegram API credentials', 'error');
+        }
+      } catch (e) {
+        showToast('Error saving credentials: ' + e.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+          <span>Save & Apply Credentials</span>
+        `;
+      }
+    }
+
     // Modal Connect Account
     function openConnectAccountModal() {
+      if (!isTelegramConfigured) {
+        showToast('Please configure your Telegram API ID & Hash first.', 'warning');
+        openApiConfigModal();
+        return;
+      }
       document.getElementById('modal-account-phone').value = '';
       document.getElementById('modal-account-code').value = '';
       document.getElementById('modal-account-password').value = '';
@@ -2674,6 +2909,19 @@ HTML_CONTENT = """<!DOCTYPE html>
         document.getElementById('target-count-userbots').innerText = s.userbots_count || 0;
         document.getElementById('target-count-usernames').innerText = s.usernames_count || 0;
         document.getElementById('target-count-uncontacted').innerText = s.pending_count || 0;
+
+        // Telegram API Config Status
+        isTelegramConfigured = !!s.telegram_configured;
+        const apiChip = document.getElementById('api-status-chip');
+        if (apiChip) {
+          if (isTelegramConfigured) {
+            apiChip.className = 'px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200/60';
+            apiChip.innerText = 'Configured';
+          } else {
+            apiChip.className = 'px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-50 text-amber-700 border border-amber-200/60';
+            apiChip.innerText = 'Not Configured';
+          }
+        }
 
       } catch (e) {
         console.error('Error loading global stats', e);

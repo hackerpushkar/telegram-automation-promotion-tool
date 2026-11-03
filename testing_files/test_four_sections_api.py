@@ -105,11 +105,21 @@ async def run_api_tests():
         assert res.status_code == 200
         print("[PASS] 4B. POST /api/sending/stop -> Safe signal handled")
 
-        # 5. Accounts: List
+        # 5. Accounts: List & Telegram API Config
         res = await client.get("/api/accounts")
         assert res.status_code == 200
         accs = res.json().get("accounts", [])
         print(f"[PASS] 5A. GET /api/accounts -> Loaded {len(accs)} registered accounts")
+
+        res = await client.get("/api/config/telegram")
+        assert res.status_code == 200
+        config_data = res.json()
+        print(f"[PASS] 5B. GET /api/config/telegram -> Configured: {config_data['configured']}")
+
+        res = await client.post("/api/config/telegram", json={"api_id": 29847123, "api_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90"})
+        assert res.status_code == 200
+        assert res.json().get("success") is True
+        print("[PASS] 5C. POST /api/config/telegram -> Successfully saved API credentials")
 
         # 6. Reports: Analytics, List, Export CSV
         res = await client.get("/api/reports/analytics")

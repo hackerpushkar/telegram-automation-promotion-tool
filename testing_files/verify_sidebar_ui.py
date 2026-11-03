@@ -109,6 +109,27 @@ async def run():
         assert "*Mega Deals!*" in bubble_text
         print(f"[PASS] 4. Telegram chat bubble live preview working: '{bubble_text[:40]}...'")
 
+        # 5. Test Telegram API Keys Modal in Login Accounts
+        await page.click("#nav-btn-accounts")
+        await page.wait_for_timeout(500)
+        api_btn = await page.query_selector("button:has-text('Telegram API Keys')")
+        assert api_btn is not None, "Telegram API Keys button not found in Login Accounts!"
+        await api_btn.click()
+        await page.wait_for_timeout(500)
+
+        modal_api_el = await page.query_selector("#modal-api-config")
+        assert modal_api_el is not None
+        modal_hidden = await modal_api_el.evaluate("el => el.classList.contains('hidden')")
+        assert not modal_hidden, "Telegram API Keys modal should be visible!"
+        print("[PASS] 5. Telegram API Keys modal opened successfully with API ID & Hash inputs!")
+
+        # Close modal
+        await page.click("#modal-api-config button:has-text('Cancel')")
+        await page.wait_for_timeout(300)
+        modal_hidden_after = await modal_api_el.evaluate("el => el.classList.contains('hidden')")
+        assert modal_hidden_after, "Modal should be closed after clicking Cancel!"
+        print("[PASS] 5B. Telegram API Keys modal closed cleanly.")
+
         # Save screenshot of new enhanced UI
         screenshot_path = "verification_4_sections_ui.png"
         await page.screenshot(path=screenshot_path)
