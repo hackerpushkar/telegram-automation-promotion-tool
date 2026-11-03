@@ -58,12 +58,13 @@ async def run():
         assert "is not a function" not in leads_tbody_text, "Found function error in table body!"
         print("[PASS] 1. Leads table rendered successfully WITHOUT '(l.extracted_from || []).map is not a function' error!")
 
-        # 2. Verify 4 Core Tabs in Sidebar
+        # 2. Verify 5 Core Tabs in Sidebar
         expected_tabs = [
             ("nav-btn-leads", "tab-leads", "Leads Directory"),
             ("nav-btn-sending", "tab-sending", "Manual Sending"),
             ("nav-btn-accounts", "tab-accounts", "Login Accounts"),
-            ("nav-btn-reports", "tab-reports", "Sending Reports")
+            ("nav-btn-reports", "tab-reports", "Sending Reports"),
+            ("nav-btn-infobot", "tab-infobot", "Info Bot")
         ]
 
         for btn_id, tab_id, title_snippet in expected_tabs:

@@ -659,7 +659,7 @@ class TelegramInfoBot:
                 "status": "completed",
             })
 
-            # Send delivery report to admin
+            # Send delivery report to admin if possible
             report = (
                 f"🎉 <b>Broadcast Completed!</b>\n\n"
                 f"👥 <b>Total Targeted:</b> <code>{total}</code>\n"
@@ -668,19 +668,27 @@ class TelegramInfoBot:
                 f"🔘 <b>Buttons Attached:</b> <code>{len(flat_buttons)}</code>\n\n"
                 f"<i>All active leads received your update.</i>"
             )
-            await self.call_api("sendMessage", {
-                "chat_id": admin_chat_id,
-                "text": report,
-                "parse_mode": "HTML",
-            })
+            if admin_chat_id:
+                try:
+                    await self.call_api("sendMessage", {
+                        "chat_id": admin_chat_id,
+                        "text": report,
+                        "parse_mode": "HTML",
+                    })
+                except Exception as notify_err:
+                    logger.debug("[TelegramInfoBot] Could not deliver report to admin %s: %s", admin_chat_id, notify_err)
 
         except Exception as e:
             logger.error("[TelegramInfoBot] Broadcast execution error: %s", e)
-            await self.call_api("sendMessage", {
-                "chat_id": admin_chat_id,
-                "text": f"⚠️ Broadcast failed: {escape_html(str(e))}",
-                "parse_mode": "HTML",
-            })
+            if admin_chat_id:
+                try:
+                    await self.call_api("sendMessage", {
+                        "chat_id": admin_chat_id,
+                        "text": f"⚠️ Broadcast failed: {escape_html(str(e))}",
+                        "parse_mode": "HTML",
+                    })
+                except Exception:
+                    pass
 
     async def poll_updates(self):
         """Asynchronous long-polling worker for Telegram Bot updates."""

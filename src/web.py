@@ -17,6 +17,7 @@ from src.extractor import extract_leads_from_text
 from src.api_client import ProaffiliatersApiClient
 from src.account_manager import AccountManager
 from src.delivery_engine import delivery_engine
+from src.info_bot import info_bot, parse_inline_buttons_markup
 from src.auth import (
     create_session_token,
     verify_session_token,
@@ -122,6 +123,13 @@ class TelegramApiConfigRequest(BaseModel):
     api_id: int
     api_hash: Optional[str] = ""
 
+class InfoBotBroadcastRequest(BaseModel):
+    message_text: str
+    photo_url: Optional[str] = None
+    button_text: Optional[str] = None
+    button_url: Optional[str] = None
+    buttons_markup: Optional[str] = None
+
 class ScanTestRequest(BaseModel):
     bio_text: str
     channel_name: Optional[str] = "Manual Test Channel"
@@ -191,6 +199,7 @@ async def get_dashboard_stats():
     contacted_count = sum(1 for l in leads if str(l.get("status", "")).lower() in ["contacted", "replied", "converted"])
 
     active_accounts = sum(1 for a in accounts if a.get("is_authorized", True))
+    info_bot_stats = await Database.get_info_bot_stats()
 
     return {
         "total_leads": len(leads),
@@ -205,6 +214,7 @@ async def get_dashboard_stats():
         "success_rate_percent": reports_analytics.get("success_rate_percent", 100.0),
         "api_url": settings.proaffiliaters_api_url,
         "sync_interval": f"{settings.sync_interval_minutes} Minutes",
+        "info_bot_users_count": info_bot_stats.get("total_leads", 0),
         "telegram_configured": bool(settings.telegram_api_id and settings.telegram_api_hash),
         "campaign_status": delivery_engine.get_campaign_status()
     }
@@ -569,6 +579,58 @@ async def export_sending_reports_csv(status: Optional[str] = Query(None)):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+# 5. Section 5: Official Info Bot (@ProaffiliatersInfoBot)
+@app.get("/api/info-bot/status")
+async def get_info_bot_status_endpoint():
+    """Returns official Info Bot status, runtime state, and lead counts."""
+    return await info_bot.get_status()
+
+@app.get("/api/info-bot/users")
+async def get_info_bot_users_endpoint(
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query("all"),
+    limit: int = Query(50, ge=1, le=500),
+    skip: int = Query(0, ge=0)
+):
+    """Returns paginated subscribers of @ProaffiliatersInfoBot."""
+    is_blocked = None
+    if status == "active":
+        is_blocked = False
+    elif status == "blocked":
+        is_blocked = True
+    users = await Database.get_info_bot_users(search=search, is_blocked=is_blocked, limit=limit, skip=skip)
+    return {"count": len(users), "users": users}
+
+@app.post("/api/info-bot/broadcast")
+async def broadcast_info_bot_endpoint(req: InfoBotBroadcastRequest):
+    """Dispatches a promotional broadcast to all active bot leads."""
+    msg_text = req.message_text.strip()
+    if not msg_text:
+        return JSONResponse(status_code=400, content={"error": "Message text is required."})
+
+    markup_parts = []
+    if req.button_text and req.button_url:
+        markup_parts.append(f"[{req.button_text.strip()} | {req.button_url.strip()}]")
+    if req.buttons_markup and req.buttons_markup.strip():
+        markup_parts.append(req.buttons_markup.strip())
+    combined_markup = "\n".join(markup_parts) if markup_parts else None
+
+    photo = req.photo_url.strip() if req.photo_url and req.photo_url.strip() else None
+
+    result = await info_bot.broadcast_from_api(
+        message_text=msg_text,
+        buttons_markup=combined_markup,
+        photo_url=photo
+    )
+    log_activity(f"Dispatched Info Bot broadcast to {result.get('total_targeted', 0)} subscribers.", "lead")
+    return result
+
+@app.get("/api/info-bot/broadcasts")
+async def get_info_bot_broadcasts_endpoint(limit: int = Query(20, ge=1, le=100)):
+    """Returns recent broadcast audit history."""
+    broadcasts = await Database.get_info_bot_broadcasts(limit=limit)
+    return {"count": len(broadcasts), "broadcasts": broadcasts}
 
 # 7. Utilities & Manual Trigger
 @app.post("/api/discovery/trigger-now")
@@ -1198,6 +1260,15 @@ HTML_CONTENT = """<!DOCTYPE html>
           </svg>
           <span class="truncate">Sending Reports</span>
           <span id="nav-reports-badge" class="nav-badge ml-auto text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">0</span>
+        </button>
+
+        <!-- Tab 5: Info Bot -->
+        <button id="nav-btn-infobot" onclick="switchTab('tab-infobot')" class="nav-item w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-all whitespace-nowrap">
+          <svg class="w-5 h-5 shrink-0 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
+          </svg>
+          <span class="truncate">Info Bot</span>
+          <span id="nav-infobot-badge" class="nav-badge ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/60">0 Users</span>
         </button>
 
       </nav>
@@ -1833,6 +1904,260 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         </section>
 
+
+        <!-- ======================================================== -->
+        <!-- SECTION 5: INFO BOT MANAGEMENT & BROADCAST               -->
+        <!-- ======================================================== -->
+        <section id="tab-infobot" class="tab-content hidden space-y-7">
+          
+          <!-- Top Header -->
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2">
+            <div>
+              <div class="flex items-center gap-3">
+                <h2 class="text-2xl font-display font-extrabold text-slate-900 tracking-tight">Info Bot Management</h2>
+                <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/70 flex items-center gap-1.5">
+                  <span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+                  @ProaffiliatersInfoBot
+                </span>
+              </div>
+              <p class="text-sm text-slate-500 mt-1">Real-time subscriber analytics and rich interactive broadcast dispatch for the official ProAffiliaters Telegram Bot.</p>
+            </div>
+
+            <div class="flex items-center gap-3">
+              <a id="infobot-deep-link" href="https://t.me/ProaffiliatersInfoBot" target="_blank" rel="noopener noreferrer" class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-slate-200/90 text-slate-700 hover:bg-slate-50 hover:border-slate-300 text-xs font-bold shadow-xs transition-all active:scale-95">
+                <svg class="w-4 h-4 text-blue-500" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.52 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/></svg>
+                <span>Open Bot in Telegram</span>
+                <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+              </a>
+
+              <button onclick="loadInfoBotData()" class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-all active:scale-95">
+                <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                <span>Refresh Bot Data</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 4 KPI Metrics Grid -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card">
+              <div class="flex items-center justify-between">
+                <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Total Bot Users</div>
+                <div class="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">👥</div>
+              </div>
+              <div id="infobot-stat-total" class="text-3xl font-display font-extrabold text-slate-900 mt-2">0</div>
+              <div class="text-[11px] text-slate-400 mt-1">Users started @ProaffiliatersInfoBot</div>
+            </div>
+
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card">
+              <div class="flex items-center justify-between">
+                <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Active Subscribers</div>
+                <div class="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold text-xs">✨</div>
+              </div>
+              <div id="infobot-stat-active" class="text-3xl font-display font-extrabold text-emerald-600 mt-2">0</div>
+              <div class="text-[11px] text-slate-400 mt-1">Eligible to receive broadcasts</div>
+            </div>
+
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card">
+              <div class="flex items-center justify-between">
+                <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Active Today (24h)</div>
+                <div class="w-8 h-8 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center font-bold text-xs">⚡</div>
+              </div>
+              <div id="infobot-stat-24h" class="text-3xl font-display font-extrabold text-purple-600 mt-2">0</div>
+              <div class="text-[11px] text-slate-400 mt-1">Interacted with bot in last 24h</div>
+            </div>
+
+            <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-card">
+              <div class="flex items-center justify-between">
+                <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Broadcasts Dispatched</div>
+                <div class="w-8 h-8 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center font-bold text-xs">📢</div>
+              </div>
+              <div id="infobot-stat-broadcasts" class="text-3xl font-display font-extrabold text-slate-900 mt-2">0</div>
+              <div class="text-[11px] text-slate-400 mt-1">Campaigns delivered via bot</div>
+            </div>
+
+          </div>
+
+          <!-- Main Broadcast Engine (2-Column Layout) -->
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-7">
+            
+            <!-- LEFT: BROADCAST COMPOSER (7 COLS) -->
+            <div class="lg:col-span-7 bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-5">
+              
+              <div class="flex items-center justify-between border-b border-slate-100 pb-4">
+                <div>
+                  <h3 class="font-display font-bold text-slate-900 text-lg flex items-center gap-2">
+                    <span>📢 Compose Telegram Broadcast</span>
+                  </h3>
+                  <p class="text-xs text-slate-500 mt-0.5">Dispatches safe, rate-limited promotional announcements with inline CTA buttons to all subscribers.</p>
+                </div>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-blue-50 text-blue-700 border border-blue-200/60 uppercase tracking-wider">HTML / Markdown</span>
+              </div>
+
+              <!-- Message Textarea -->
+              <div>
+                <div class="flex items-center justify-between mb-1.5">
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider">Broadcast Content</label>
+                  <span class="text-[11px] text-slate-400 font-mono">&lt;b&gt;bold&lt;/b&gt; &lt;i&gt;italic&lt;/i&gt; &lt;a href="..."&gt;link&lt;/a&gt;</span>
+                </div>
+                <textarea id="infobot-broadcast-text" oninput="updateInfoBotBubblePreview()" rows="6" placeholder="Write broadcast message for bot users...&#10;&#10;🔥 *Special Deal Drop:* Get up to 80% discount on top tech deals today!&#10;👉 Tap below to explore verified offers." class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-sans focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all"></textarea>
+              </div>
+
+              <!-- Optional Photo / Banner URL -->
+              <div>
+                <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Banner Image URL (Optional)</label>
+                <input id="infobot-broadcast-photo" oninput="updateInfoBotBubblePreview()" type="url" placeholder="https://example.com/banner.jpg" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all">
+              </div>
+
+              <!-- Inline Action Button -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
+                <div>
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Button Text (Optional)</label>
+                  <input id="infobot-broadcast-btn-text" oninput="updateInfoBotBubblePreview()" type="text" placeholder="e.g. 🚀 Explore Top Deals" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5">Button URL (Optional)</label>
+                  <input id="infobot-broadcast-btn-url" oninput="updateInfoBotBubblePreview()" type="url" placeholder="https://app.proaffiliaters.com" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+              </div>
+
+              <!-- Live Telegram Client Mockup -->
+              <div class="pt-2">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Telegram Client Chat Bubble Preview</div>
+                <div class="p-4 bg-slate-100 rounded-2xl border border-slate-200/80">
+                  <div class="max-w-sm bg-white rounded-2xl p-3.5 shadow-sm border border-slate-200/70 space-y-2.5">
+                    <div id="infobot-preview-img-box" class="hidden rounded-xl overflow-hidden max-h-44 bg-slate-100">
+                      <img id="infobot-preview-img" src="" alt="Banner" class="w-full object-cover">
+                    </div>
+                    <div id="infobot-preview-text" class="text-xs text-slate-800 whitespace-pre-wrap leading-relaxed font-sans">
+                      Broadcast message preview will appear here...
+                    </div>
+                    <div id="infobot-preview-btn-box" class="hidden pt-1">
+                      <div id="infobot-preview-btn-label" class="w-full py-2.5 px-3 text-center rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs border border-indigo-200 shadow-2xs transition-all">
+                        🚀 Explore Top Deals
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Dispatch Action Button -->
+              <div class="pt-2 flex items-center justify-between">
+                <div class="text-xs text-slate-500">
+                  Targeting: <span id="infobot-composer-target-count" class="font-bold text-indigo-600">0</span> active subscribers
+                </div>
+                <button id="btn-dispatch-broadcast" onclick="sendInfoBotBroadcast()" class="flex items-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-500/25 transition-all active:scale-95">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                  <span>Dispatch Broadcast to Subscribers</span>
+                </button>
+              </div>
+
+            </div>
+
+            <!-- RIGHT: BOT STATUS & RECENT BROADCAST AUDIT (5 COLS) -->
+            <div class="lg:col-span-5 space-y-6">
+
+              <!-- Bot System Card -->
+              <div class="bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-4">
+                <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 class="font-display font-bold text-slate-900 text-base">Bot System Status</h3>
+                  <span id="infobot-badge-runtime" class="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200">Online</span>
+                </div>
+
+                <div class="space-y-3 text-xs">
+                  <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/60">
+                    <span class="text-slate-500 font-medium">Bot Handle:</span>
+                    <span id="infobot-status-handle" class="font-mono font-bold text-slate-800">@ProaffiliatersInfoBot</span>
+                  </div>
+
+                  <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/60">
+                    <span class="text-slate-500 font-medium">Admin ID:</span>
+                    <span id="infobot-status-admin" class="font-mono font-bold text-slate-800">7573032265</span>
+                  </div>
+
+                  <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/60">
+                    <span class="text-slate-500 font-medium">Blocked Users:</span>
+                    <span id="infobot-status-blocked" class="font-mono font-bold text-amber-600">0</span>
+                  </div>
+
+                  <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/60">
+                    <span class="text-slate-500 font-medium">Delivery Rate:</span>
+                    <span class="font-mono font-bold text-slate-800">~28 msgs / sec</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Recent Broadcasts List Card -->
+              <div class="bg-white p-7 rounded-3xl border border-slate-200/80 shadow-card space-y-4">
+                <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 class="font-display font-bold text-slate-900 text-base">Recent Broadcasts</h3>
+                  <span id="infobot-broadcasts-count-badge" class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-slate-100 text-slate-600">0 Total</span>
+                </div>
+
+                <div id="infobot-broadcasts-history" class="space-y-3 max-h-96 overflow-y-auto">
+                  <div class="py-8 text-center text-slate-400 text-xs">No previous broadcasts sent yet.</div>
+                </div>
+              </div>
+
+            </div>
+
+          </div>
+
+          <!-- Bot Subscribers Directory Table -->
+          <div class="bg-white rounded-3xl border border-slate-200/80 shadow-card overflow-hidden">
+            <div class="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h3 class="font-display font-extrabold text-slate-900 text-base">Bot Subscribers Directory</h3>
+                <p class="text-xs text-slate-500 mt-0.5">All Telegram users who initiated the bot or converted from ad campaigns.</p>
+              </div>
+
+              <div class="flex items-center gap-3">
+                <div class="relative">
+                  <input id="infobot-users-search" oninput="debounceInfobotUserSearch()" type="text" placeholder="Search handle, name, ID..." class="w-64 pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                  <svg class="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                </div>
+
+                <select id="infobot-users-status-filter" onchange="loadInfoBotUsers()" class="text-xs py-2 px-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-700 font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                  <option value="all">All Subscribers</option>
+                  <option value="active">Active Only</option>
+                  <option value="blocked">Blocked Only</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-left text-sm">
+                <thead class="bg-slate-50/80 border-b border-slate-200/80 text-slate-500 uppercase text-[11px] font-bold tracking-wider">
+                  <tr>
+                    <th class="py-4 px-6">User / Contact</th>
+                    <th class="py-4 px-4">Chat ID</th>
+                    <th class="py-4 px-4">Attribution (Campaign)</th>
+                    <th class="py-4 px-4">Joined At</th>
+                    <th class="py-4 px-4">Last Active</th>
+                    <th class="py-4 px-6">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="infobot-users-table-body" class="divide-y divide-slate-100 font-medium">
+                  <tr>
+                    <td colspan="6" class="py-16 text-center text-slate-400">Loading bot subscribers...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Pagination Bar -->
+            <div class="p-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+              <div id="infobot-users-pagination-info">Showing 0 subscribers</div>
+              <div class="flex items-center gap-2">
+                <button id="btn-infobot-prev" onclick="changeInfoBotPage(-1)" class="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-40 font-semibold" disabled>Previous</button>
+                <button id="btn-infobot-next" onclick="changeInfoBotPage(1)" class="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-40 font-semibold" disabled>Next</button>
+              </div>
+            </div>
+
+          </div>
+
+        </section>
+
       </div>
     </main>
   </div>
@@ -2044,7 +2369,8 @@ HTML_CONTENT = """<!DOCTYPE html>
         'tab-leads': 'Leads Directory',
         'tab-sending': 'Manual Sending',
         'tab-accounts': 'Login Accounts',
-        'tab-reports': 'Sending Reports'
+        'tab-reports': 'Sending Reports',
+        'tab-infobot': 'Info Bot'
       };
       document.getElementById('header-breadcrumb').innerHTML = `ProAffiliaters <span class="text-slate-300">/</span> <span class="text-indigo-600">${titles[tabId] || 'Dashboard'}</span>`;
 
@@ -2052,6 +2378,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (tabId === 'tab-sending') { loadSendingData(); checkCampaignStatus(); }
       if (tabId === 'tab-accounts') loadAccounts();
       if (tabId === 'tab-reports') loadReports();
+      if (tabId === 'tab-infobot') loadInfoBotData();
     }
 
     function refreshCurrentTab() {
@@ -2060,6 +2387,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (currentTab === 'tab-sending') { loadSendingData(); checkCampaignStatus(); }
       if (currentTab === 'tab-accounts') loadAccounts();
       if (currentTab === 'tab-reports') loadReports();
+      if (currentTab === 'tab-infobot') loadInfoBotData();
       showToast('Dashboard refreshed.', 'info');
     }
 
@@ -3014,6 +3342,290 @@ HTML_CONTENT = """<!DOCTYPE html>
       } catch (e) {
         showToast('Sync error: ' + e.message, 'error');
       }
+    }
+
+
+    // ==========================================
+    // SECTION 5: INFO BOT LOGIC & BROADCAST
+    // ==========================================
+    let infobotPage = 0;
+    const infobotLimit = 50;
+    let infobotSearchTimeout = null;
+
+    function debounceInfobotUserSearch() {
+      clearTimeout(infobotSearchTimeout);
+      infobotSearchTimeout = setTimeout(() => {
+        infobotPage = 0;
+        loadInfoBotUsers();
+      }, 350);
+    }
+
+    async function loadInfoBotData() {
+      await Promise.allSettled([
+        loadInfoBotStats(),
+        loadInfoBotBroadcasts(),
+        loadInfoBotUsers()
+      ]);
+    }
+
+    async function loadInfoBotStats() {
+      try {
+        const res = await fetch('/api/info-bot/status');
+        const data = await res.json();
+        if (data.success) {
+          const total = data.total_leads || 0;
+          const active = Math.max(0, total - (data.blocked_leads || 0));
+          document.getElementById('infobot-stat-total').innerText = total;
+          document.getElementById('infobot-stat-active').innerText = active;
+          document.getElementById('infobot-stat-24h').innerText = data.active_24h || 0;
+          document.getElementById('infobot-stat-broadcasts').innerText = data.broadcasts_count || 0;
+
+          const targetCountEl = document.getElementById('infobot-composer-target-count');
+          if (targetCountEl) targetCountEl.innerText = active;
+
+          const blockedEl = document.getElementById('infobot-status-blocked');
+          if (blockedEl) blockedEl.innerText = data.blocked_leads || 0;
+
+          const handleEl = document.getElementById('infobot-status-handle');
+          if (handleEl && data.bot_username) handleEl.innerText = `@${data.bot_username}`;
+
+          const linkEl = document.getElementById('infobot-deep-link');
+          if (linkEl && data.deep_link) linkEl.href = data.deep_link;
+
+          const badgeRuntime = document.getElementById('infobot-badge-runtime');
+          if (badgeRuntime) {
+            if (data.running) {
+              badgeRuntime.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200';
+              badgeRuntime.innerText = 'Online';
+            } else {
+              badgeRuntime.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-50 text-amber-700 border border-amber-200';
+              badgeRuntime.innerText = 'Configured';
+            }
+          }
+
+          const sidebarBadge = document.getElementById('nav-infobot-badge');
+          if (sidebarBadge) sidebarBadge.innerText = `${total} Users`;
+        }
+      } catch (err) {
+        console.error('Failed to load info bot stats:', err);
+      }
+    }
+
+    function updateInfoBotBubblePreview() {
+      const text = document.getElementById('infobot-broadcast-text').value.trim();
+      const photo = document.getElementById('infobot-broadcast-photo').value.trim();
+      const btnText = document.getElementById('infobot-broadcast-btn-text').value.trim();
+
+      const previewText = document.getElementById('infobot-preview-text');
+      const imgBox = document.getElementById('infobot-preview-img-box');
+      const imgEl = document.getElementById('infobot-preview-img');
+      const btnBox = document.getElementById('infobot-preview-btn-box');
+      const btnLabel = document.getElementById('infobot-preview-btn-label');
+
+      if (text) {
+        previewText.innerText = text;
+      } else {
+        previewText.innerText = 'Broadcast message preview will appear here...';
+      }
+
+      if (photo) {
+        imgEl.src = photo;
+        imgBox.classList.remove('hidden');
+      } else {
+        imgBox.classList.add('hidden');
+      }
+
+      if (btnText) {
+        btnLabel.innerText = btnText;
+        btnBox.classList.remove('hidden');
+      } else {
+        btnBox.classList.add('hidden');
+      }
+    }
+
+    async function sendInfoBotBroadcast() {
+      const text = document.getElementById('infobot-broadcast-text').value.trim();
+      const photo = document.getElementById('infobot-broadcast-photo').value.trim();
+      const btnText = document.getElementById('infobot-broadcast-btn-text').value.trim();
+      const btnUrl = document.getElementById('infobot-broadcast-btn-url').value.trim();
+
+      if (!text) {
+        showToast('Please enter broadcast message text.', 'error');
+        return;
+      }
+
+      if (btnText && !btnUrl) {
+        showToast('Please provide a URL for the action button.', 'error');
+        return;
+      }
+
+      const btn = document.getElementById('btn-dispatch-broadcast');
+      const originalHTML = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = `
+        <svg class="w-4 h-4 animate-spin text-white" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>
+        <span>Dispatching Broadcast...</span>
+      `;
+
+      try {
+        const payload = {
+          message_text: text,
+          photo_url: photo || null,
+          button_text: btnText || null,
+          button_url: btnUrl || null
+        };
+
+        const res = await fetch('/api/info-bot/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (res.ok && data.success) {
+          showToast(data.message || 'Broadcast successfully dispatched in background!', 'success');
+          // Clear inputs
+          document.getElementById('infobot-broadcast-text').value = '';
+          document.getElementById('infobot-broadcast-photo').value = '';
+          document.getElementById('infobot-broadcast-btn-text').value = '';
+          document.getElementById('infobot-broadcast-btn-url').value = '';
+          updateInfoBotBubblePreview();
+          setTimeout(() => {
+            loadInfoBotStats();
+            loadInfoBotBroadcasts();
+          }, 1200);
+        } else {
+          showToast(data.error || 'Failed to dispatch broadcast.', 'error');
+        }
+      } catch (err) {
+        showToast('Error dispatching broadcast: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHTML;
+      }
+    }
+
+    async function loadInfoBotBroadcasts() {
+      try {
+        const res = await fetch('/api/info-bot/broadcasts?limit=15');
+        const data = await res.json();
+        const container = document.getElementById('infobot-broadcasts-history');
+        const badge = document.getElementById('infobot-broadcasts-count-badge');
+
+        if (badge) badge.innerText = `${data.count || 0} Total`;
+
+        if (!data.broadcasts || data.broadcasts.length === 0) {
+          container.innerHTML = '<div class="py-8 text-center text-slate-400 text-xs">No previous broadcasts recorded yet.</div>';
+          return;
+        }
+
+        container.innerHTML = data.broadcasts.map(b => {
+          const dt = b.created_at ? new Date(b.created_at).toLocaleString() : 'Recent';
+          const targeted = b.total_targeted || 0;
+          const sent = b.successful_sent || 0;
+          const failed = b.failed_count || 0;
+          const textPreview = (b.message_text || '').replace(/<[^>]*>?/gm, '').substring(0, 90) + '...';
+          const hasPhoto = !!b.media_url;
+
+          return `
+            <div class="p-3.5 rounded-2xl border border-slate-200/80 hover:border-slate-300 bg-slate-50/70 transition-all space-y-2">
+              <div class="flex items-center justify-between text-[11px]">
+                <span class="font-bold text-slate-500">${dt}</span>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  ✅ ${sent} / ${targeted} Sent
+                </span>
+              </div>
+              <p class="text-xs text-slate-800 line-clamp-2 font-medium">${textPreview}</p>
+              <div class="flex items-center gap-3 text-[11px] text-slate-400 font-medium">
+                ${hasPhoto ? '<span class="flex items-center gap-1 text-indigo-600">🖼️ Banner Attached</span>' : ''}
+                ${failed > 0 ? `<span class="text-rose-500">❌ ${failed} Failed</span>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (err) {
+        console.error('Failed to load broadcasts history:', err);
+      }
+    }
+
+    async function loadInfoBotUsers() {
+      try {
+        const search = document.getElementById('infobot-users-search')?.value.trim() || '';
+        const status = document.getElementById('infobot-users-status-filter')?.value || 'all';
+        const skip = infobotPage * infobotLimit;
+
+        let url = `/api/info-bot/users?limit=${infobotLimit}&skip=${skip}`;
+        if (search) url += `&search=${encodeURIComponent(search)}`;
+        if (status !== 'all') url += `&status=${encodeURIComponent(status)}`;
+
+        const res = await fetch(url);
+        const data = await res.json();
+        const tbody = document.getElementById('infobot-users-table-body');
+        const pageInfo = document.getElementById('infobot-users-pagination-info');
+        const prevBtn = document.getElementById('btn-infobot-prev');
+        const nextBtn = document.getElementById('btn-infobot-next');
+
+        if (!data.users || data.users.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="6" class="py-16 text-center text-slate-400">No bot subscribers found matching criteria.</td></tr>';
+          if (pageInfo) pageInfo.innerText = 'Showing 0 subscribers';
+          if (prevBtn) prevBtn.disabled = true;
+          if (nextBtn) nextBtn.disabled = true;
+          return;
+        }
+
+        tbody.innerHTML = data.users.map(u => {
+          const username = u.username ? `@${u.username.replace('@', '')}` : 'Anonymous';
+          const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ') || 'Telegram User';
+          const initial = (u.first_name || u.username || 'U').charAt(0).toUpperCase();
+          const chatId = u.telegram_chat_id || 'N/A';
+          const payload = u.start_payload || '<span class="text-slate-400 italic">Direct / Organic</span>';
+          const joined = u.joined_at ? new Date(u.joined_at).toLocaleDateString() : 'N/A';
+          const lastActive = u.last_active_at ? new Date(u.last_active_at).toLocaleDateString() : 'N/A';
+          const isBlocked = u.is_blocked === true;
+
+          return `
+            <tr class="hover:bg-slate-50/80 transition-colors">
+              <td class="py-4 px-6">
+                <div class="flex items-center gap-3">
+                  <div class="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-200/60 text-indigo-700 flex items-center justify-center font-bold text-xs shrink-0">
+                    ${initial}
+                  </div>
+                  <div>
+                    <div class="font-bold text-slate-900">${fullName}</div>
+                    <div class="text-xs font-mono text-indigo-600">${username}</div>
+                  </div>
+                </div>
+              </td>
+              <td class="py-4 px-4 font-mono text-xs text-slate-600 font-semibold">${chatId}</td>
+              <td class="py-4 px-4 text-xs font-medium text-slate-700">
+                <span class="px-2.5 py-1 rounded-lg bg-slate-100 font-mono text-[11px] border border-slate-200">${payload}</span>
+              </td>
+              <td class="py-4 px-4 text-xs text-slate-500">${joined}</td>
+              <td class="py-4 px-4 text-xs text-slate-500">${lastActive}</td>
+              <td class="py-4 px-6">
+                ${isBlocked
+                  ? '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200">Blocked</span>'
+                  : '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">Active</span>'
+                }
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        if (pageInfo) {
+          pageInfo.innerText = `Showing ${skip + 1}–${skip + data.users.length} subscribers`;
+        }
+        if (prevBtn) prevBtn.disabled = (infobotPage === 0);
+        if (nextBtn) nextBtn.disabled = (data.users.length < infobotLimit);
+
+      } catch (err) {
+        console.error('Failed to load info bot users:', err);
+      }
+    }
+
+    function changeInfoBotPage(delta) {
+      infobotPage = Math.max(0, infobotPage + delta);
+      loadInfoBotUsers();
     }
 
     // INIT

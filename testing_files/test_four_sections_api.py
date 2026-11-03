@@ -138,7 +138,37 @@ async def run_api_tests():
         assert "text/csv" in res.headers.get("content-type", "")
         print("[PASS] 6C. GET /api/reports/export-csv -> Delivery audit CSV generated successfully")
 
-    print("\nALL 4-SECTION APIS TESTED AND FUNCTIONING WITH 100% SUCCESS!\n")
+        # 7. Section 5: Official Info Bot (@ProaffiliatersInfoBot)
+        res = await client.get("/api/info-bot/status")
+        assert res.status_code == 200
+        ib_status = res.json()
+        assert ib_status.get("success") is True
+        assert "total_leads" in ib_status and "bot_username" in ib_status
+        print(f"[PASS] 7A. GET /api/info-bot/status -> Bot: @{ib_status.get('bot_username')}, Users: {ib_status.get('total_leads')}")
+
+        res = await client.get("/api/info-bot/users")
+        assert res.status_code == 200
+        ib_users = res.json()
+        assert "users" in ib_users and "count" in ib_users
+        print(f"[PASS] 7B. GET /api/info-bot/users -> Found {ib_users.get('count')} subscribers")
+
+        res = await client.get("/api/info-bot/broadcasts")
+        assert res.status_code == 200
+        ib_broadcasts = res.json()
+        assert "broadcasts" in ib_broadcasts
+        print(f"[PASS] 7C. GET /api/info-bot/broadcasts -> Loaded {ib_broadcasts.get('count')} past broadcasts")
+
+        res = await client.post("/api/info-bot/broadcast", json={
+            "message_text": "⚡ Special VIP Test Broadcast from ProAffiliaters Lead Engine!",
+            "button_text": "Explore Deals",
+            "button_url": "https://app.proaffiliaters.com"
+        })
+        assert res.status_code == 200
+        ib_bc_res = res.json()
+        assert ib_bc_res.get("success") is True
+        print(f"[PASS] 7D. POST /api/info-bot/broadcast -> Dispatched broadcast: {ib_bc_res.get('message')}")
+
+    print("\nALL ARCHITECTURE APIS (LEADS, SENDING, ACCOUNTS, REPORTS, INFO BOT) 100% OPERATIONAL!\n")
 
 if __name__ == "__main__":
     asyncio.run(run_api_tests())

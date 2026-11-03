@@ -336,6 +336,13 @@ The dashboard is structured around **EXACTLY 4 Production Sections**, completely
      - Visual breakdown cards: Deliveries by Sender Account and Target Segmentation (Userbots vs Usernames).
      - Complete Delivery History Table with timestamp, recipient handle, lead type, sender phone, post title, delivery status, and notes/snippets.
      - `📥 Export Audit CSV` button for offline reporting.
+  5. 🤖 **Info Bot**:
+     - Dedicated web section for managing the official Telegram Bot (`@ProaffiliatersInfoBot`).
+     - **Subscriber Analytics KPI Cards**: Total Bot Users, Active Subscribers, Active Today (24h), and Broadcasts Dispatched.
+     - **Broadcast Composer**: Markdown/HTML content, optional photo/banner URL, inline CTA button (label + URL), and live Telegram Client Chat Bubble Mockup preview.
+     - **Safe Background Dispatch**: Asynchronous rate-limited broadcasting (~28 msgs/sec) to all active subscribers.
+     - **Bot Subscribers Directory**: Table of registered users with search, status filters (Active vs Blocked), joined dates, chat IDs, and attribution campaign payloads.
+     - **Broadcast History**: Audit trail of previous dispatches, delivery counts, and failure rates.
   - `📆 5-Week Drip Funnel`: Progressive weekly drip automation with funnel chips, stage cooldown enforcement, and batch execution.
   - `🚀 Bot Outreach`: Promotional post publisher (Posts 1-5) and campaign pacing forwarder.
   - `🤖 Info Bot & Ads`: User registration table, attribution tags, and admin WYSIWYG broadcast console.
