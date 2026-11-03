@@ -10,6 +10,11 @@ See **[`AGENTS.md`](file:///c:/Users/spush/OneDrive/Desktop/Proaffiliaters/Teleg
 ---
 
 ## Quick Reference
+- **VPS Project Directory**: `telegram-automation-promotion-tool` (Exact path: `cd ~/telegram-automation-promotion-tool` or `cd /root/telegram-automation-promotion-tool`)
+- **Quick VPS Update Command**:
+  ```bash
+  cd ~/telegram-automation-promotion-tool && git pull origin main && ./deploy.sh --quick
+  ```
 - **Source Web API**: `GET https://app.proaffiliaters.com/api/external/sources/recent?minutes=30`
 - **Auth Header**: `x-api-key: proaff_ext_source_sync_key_2026`
 - **Interval**: Every 30 minutes

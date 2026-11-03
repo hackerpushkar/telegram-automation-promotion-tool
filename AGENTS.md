@@ -28,6 +28,15 @@ This document serves as the **mandatory instructions and operating guidelines** 
 
 **Telegram Promotion Tool** is an automated background lead extraction and promotion pipeline connected to the **ProAffiliaters Web Application**.
 
+### VPS Deployment Standard:
+- **Server Domain**: `https://telegramtools.proaffiliaters.com`
+- **VPS Project Directory**: `telegram-automation-promotion-tool` (Exact path: `cd ~/telegram-automation-promotion-tool` or `cd /root/telegram-automation-promotion-tool`).
+- **Quick Deployment Command**:
+  ```bash
+  cd ~/telegram-automation-promotion-tool && git pull origin main && ./deploy.sh --quick
+  ```
+- **PM2 Process**: `telegram-promotion-tool`
+
 ### Primary Workflow:
 1. **External Source Polling (Every 30 Minutes)**:
    - Polls `https://app.proaffiliaters.com/api/external/sources/recent?minutes=30` with header `x-api-key: proaff_ext_source_sync_key_2026`.

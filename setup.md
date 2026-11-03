@@ -268,7 +268,8 @@ To update your VPS server running on Hostinger with the clean 4-section architec
 ssh root@<vps_ip>
 
 # Navigate to the project directory:
-cd /var/www/telegram-promotion-tool  # or your deployment directory
+cd ~/telegram-automation-promotion-tool
+# or: cd /root/telegram-automation-promotion-tool
 
 # Pull latest commits from GitHub:
 git pull origin main
