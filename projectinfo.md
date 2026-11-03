@@ -343,6 +343,7 @@ The dashboard is structured around **EXACTLY 4 Production Sections**, completely
      - **Safe Background Dispatch**: Asynchronous rate-limited broadcasting (~28 msgs/sec) to all active subscribers.
      - **Bot Subscribers Directory**: Table of registered users with search, status filters (Active vs Blocked), joined dates, chat IDs, and attribution campaign payloads.
      - **Broadcast History**: Audit trail of previous dispatches, delivery counts, and failure rates.
+  - `🤖 Bot Handshake & Language / Anti-Spam Solver`: Automatic pre-promo greeting (`"Hi"`), inline language button auto-clicking (`[ English ]`), and anti-spam verification (`[ Continue ]`) to ensure promo delivery reaches channel curator inboxes.
   - `📆 5-Week Drip Funnel`: Progressive weekly drip automation with funnel chips, stage cooldown enforcement, and batch execution.
   - `🚀 Bot Outreach`: Promotional post publisher (Posts 1-5) and campaign pacing forwarder.
   - `🤖 Info Bot & Ads`: User registration table, attribution tags, and admin WYSIWYG broadcast console.

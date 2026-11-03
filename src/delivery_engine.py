@@ -268,7 +268,16 @@ class DeliveryEngine:
 
                 try:
                     target_peer = f"@{recipient_handle}"
-                    
+
+                    # If recipient is a bot, execute handshake / language bypass first
+                    if report_type == "bot":
+                        try:
+                            from src.bot_interactor import prepare_bot_for_promo
+                            bot_ent = await client.get_entity(target_peer)
+                            await prepare_bot_for_promo(client, bot_ent, bot_handle=target_peer)
+                        except Exception as hs_err:
+                            logger.debug("Handshake notice on %s: %s", target_peer, hs_err)
+
                     if image_url and os.path.exists(image_url):
                         await client.send_file(target_peer, image_url, caption=final_message)
                     else:

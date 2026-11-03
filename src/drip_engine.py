@@ -190,6 +190,13 @@ class DripEngine:
                     # Resolve bot entity
                     bot_entity = await client.get_entity(lead_target)
 
+                    # Bot Handshake & Language / Anti-Spam barrier check
+                    try:
+                        from src.bot_interactor import prepare_bot_for_promo
+                        await prepare_bot_for_promo(client, bot_entity, bot_handle=lead_target)
+                    except Exception as hs_err:
+                        logger.debug("Handshake notice on %s: %s", lead_target, hs_err)
+
                     sent_success = False
 
                     # 1. Attempt official channel post forward

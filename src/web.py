@@ -383,6 +383,29 @@ async def delete_promotional_post_endpoint(post_id: str):
         log_activity(f"Deleted promotional post template {post_id}", "info")
     return {"success": ok}
 
+@app.post("/api/leads/verify-all")
+async def verify_all_leads_endpoint():
+    """
+    Audits all stored leads with Telegram MTProto.
+    Removes any handles that are broadcast channels, supergroups, or system/email domains.
+    Ensures only genuine user accounts and bots remain in the Leads Directory.
+    """
+    try:
+        from src.keyword_search_engine import KeywordSearchEngine
+        from src.entity_verifier import scrub_non_user_leads
+        client = None
+        try:
+            client = await KeywordSearchEngine.get_authorized_client()
+        except Exception:
+            pass
+        res = await scrub_non_user_leads(client)
+        msg = f"Audited {res['total_checked']} leads. Removed {len(res['removed_channels'])} channels, {len(res['removed_groups'])} groups, {len(res['removed_system_or_emails'])} invalid/email domains."
+        log_activity(msg, "lead")
+        return {"status": "success", "message": msg, "result": res}
+    except Exception as e:
+        logger.error("Error verifying leads: %s", e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
 @app.post("/api/sending/start")
 async def start_manual_sending(req: StartManualSendingRequest):
     """Starts a promotional sending campaign with account rotation."""
@@ -481,6 +504,29 @@ async def delete_account_endpoint(phone: str):
     if ok:
         log_activity(f"Removed Telegram account {phone}", "info")
     return {"success": ok}
+
+@app.post("/api/leads/verify-all")
+async def verify_all_leads_endpoint():
+    """
+    Audits all stored leads with Telegram MTProto.
+    Removes any handles that are broadcast channels, supergroups, or system/email domains.
+    Ensures only genuine user accounts and bots remain in the Leads Directory.
+    """
+    try:
+        from src.keyword_search_engine import KeywordSearchEngine
+        from src.entity_verifier import scrub_non_user_leads
+        client = None
+        try:
+            client = await KeywordSearchEngine.get_authorized_client()
+        except Exception:
+            pass
+        res = await scrub_non_user_leads(client)
+        msg = f"Audited {res['total_checked']} leads. Removed {len(res['removed_channels'])} channels, {len(res['removed_groups'])} groups, {len(res['removed_system_or_emails'])} invalid/email domains."
+        log_activity(msg, "lead")
+        return {"status": "success", "message": msg, "result": res}
+    except Exception as e:
+        logger.error("Error verifying leads: %s", e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 @app.post("/api/accounts/clear-demo")
 async def clear_demo_accounts_endpoint():
