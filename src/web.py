@@ -642,7 +642,13 @@ async def trigger_discovery_now_endpoint():
         res = await KeywordSearchEngine.run_autonomous_cycle(max_keywords=3)
         channels = res.get("channels_found", 0)
         leads = res.get("leads_extracted", 0)
-        msg = f"Discovered {channels} channels and extracted {leads} leads."
+        status = res.get("status", "completed")
+        msg = res.get("message") or f"Discovered {channels} channels and extracted {leads} leads."
+
+        if status == "error":
+            log_activity(f"Discovery notice: {msg}", "info")
+            return JSONResponse(status_code=400, content={"status": "error", "message": msg, "channels_found": 0, "leads_extracted": 0})
+
         log_activity(f"Discovery cycle finished: {msg}", "lead")
         return {
             "status": "success",

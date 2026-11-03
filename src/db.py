@@ -291,46 +291,46 @@ class Database:
     @classmethod
     async def _seed_default_keywords(cls):
         """Seeds standard deal and affiliate keywords if none exist or adds missing ones."""
+        defaults = [
+            {"keyword": "loot deals", "category": "deals"},
+            {"keyword": "amazon deals", "category": "amazon"},
+            {"keyword": "flipkart deals", "category": "flipkart"},
+            {"keyword": "shopping offers", "category": "deals"},
+            {"keyword": "discount coupons", "category": "coupons"},
+            {"keyword": "telegram deals", "category": "deals"},
+            {"keyword": "loot offers", "category": "deals"},
+            {"keyword": "free loot", "category": "loot"},
+            {"keyword": "affiliate deals", "category": "affiliate"},
+            {"keyword": "deal bot", "category": "bot"},
+            {"keyword": "loot bot", "category": "bot"},
+            {"keyword": "coupon bot", "category": "bot"},
+            {"keyword": "deals alert", "category": "deals"},
+            {"keyword": "myntra deals", "category": "myntra"},
+            {"keyword": "ajio deals", "category": "ajio"},
+            {"keyword": "cashback offers", "category": "cashback"},
+            {"keyword": "promo codes", "category": "coupons"},
+            {"keyword": "price drops", "category": "deals"},
+            {"keyword": "secret loot", "category": "loot"},
+            {"keyword": "shopping loot", "category": "shopping"},
+            {"keyword": "best deals india", "category": "deals"},
+            {"keyword": "coupon code", "category": "coupons"},
+            {"keyword": "tech deals", "category": "tech"},
+            {"keyword": "fashion deals", "category": "fashion"},
+            {"keyword": "groceries loot", "category": "groceries"},
+            {"keyword": "freebies india", "category": "loot"},
+            {"keyword": "refer and earn", "category": "affiliate"},
+            {"keyword": "telegram offer", "category": "offers"},
+            {"keyword": "daily loot", "category": "loot"},
+            {"keyword": "loot tricks", "category": "tricks"},
+            {"keyword": "hidden deals", "category": "deals"},
+            {"keyword": "flash sale", "category": "sales"},
+            {"keyword": "loot update", "category": "loot"},
+            {"keyword": "e-commerce loot", "category": "ecommerce"},
+            {"keyword": "amazon loot tricks", "category": "amazon"}
+        ]
+        now = datetime.utcnow()
         keywords_col = cls.get_search_keywords_collection()
         if keywords_col is not None:
-            defaults = [
-                {"keyword": "loot deals", "category": "deals"},
-                {"keyword": "amazon deals", "category": "amazon"},
-                {"keyword": "flipkart deals", "category": "flipkart"},
-                {"keyword": "shopping offers", "category": "deals"},
-                {"keyword": "discount coupons", "category": "coupons"},
-                {"keyword": "telegram deals", "category": "deals"},
-                {"keyword": "loot offers", "category": "deals"},
-                {"keyword": "free loot", "category": "loot"},
-                {"keyword": "affiliate deals", "category": "affiliate"},
-                {"keyword": "deal bot", "category": "bot"},
-                {"keyword": "loot bot", "category": "bot"},
-                {"keyword": "coupon bot", "category": "bot"},
-                {"keyword": "deals alert", "category": "deals"},
-                {"keyword": "myntra deals", "category": "myntra"},
-                {"keyword": "ajio deals", "category": "ajio"},
-                {"keyword": "cashback offers", "category": "cashback"},
-                {"keyword": "promo codes", "category": "coupons"},
-                {"keyword": "price drops", "category": "deals"},
-                {"keyword": "secret loot", "category": "loot"},
-                {"keyword": "shopping loot", "category": "shopping"},
-                {"keyword": "best deals india", "category": "deals"},
-                {"keyword": "coupon code", "category": "coupons"},
-                {"keyword": "tech deals", "category": "tech"},
-                {"keyword": "fashion deals", "category": "fashion"},
-                {"keyword": "groceries loot", "category": "groceries"},
-                {"keyword": "freebies india", "category": "loot"},
-                {"keyword": "refer and earn", "category": "affiliate"},
-                {"keyword": "telegram offer", "category": "offers"},
-                {"keyword": "daily loot", "category": "loot"},
-                {"keyword": "loot tricks", "category": "tricks"},
-                {"keyword": "hidden deals", "category": "deals"},
-                {"keyword": "flash sale", "category": "sales"},
-                {"keyword": "loot update", "category": "loot"},
-                {"keyword": "e-commerce loot", "category": "ecommerce"},
-                {"keyword": "amazon loot tricks", "category": "amazon"}
-            ]
-            now = datetime.utcnow()
             for d in defaults:
                 doc = {
                     "keyword": d["keyword"],
@@ -350,6 +350,18 @@ class Database:
                 except Exception:
                     pass
             logger.info("Verified %d target search keywords in database.", len(defaults))
+        else:
+            for d in defaults:
+                if d["keyword"] not in cls._fallback_keywords:
+                    cls._fallback_keywords[d["keyword"]] = {
+                        "keyword": d["keyword"],
+                        "category": d["category"],
+                        "enabled": True,
+                        "total_channels_found": 0,
+                        "total_leads_extracted": 0,
+                        "last_searched_at": None,
+                        "created_at": now
+                    }
 
     @classmethod
     async def upsert_lead(cls, lead: Lead) -> Tuple[bool, str]:
@@ -1243,13 +1255,17 @@ class Database:
 
     @classmethod
     async def get_search_keywords(cls, enabled_only: bool = False) -> List[Dict[str, Any]]:
-        """Retrieves list of configured target search keywords."""
+        """Retrieves list of configured target search keywords, automatically seeding defaults if empty."""
         keywords_col = cls.get_search_keywords_collection()
         query = {"enabled": True} if enabled_only else {}
         if keywords_col is not None:
             try:
                 cursor = keywords_col.find(query).sort("created_at", -1)
                 docs = await cursor.to_list(length=200)
+                if not docs:
+                    await cls._seed_default_keywords()
+                    cursor = keywords_col.find(query).sort("created_at", -1)
+                    docs = await cursor.to_list(length=200)
                 for d in docs:
                     if "_id" in d:
                         d["id"] = str(d.pop("_id"))
@@ -1258,6 +1274,8 @@ class Database:
                 logger.error("MongoDB get_search_keywords error: %s", e)
 
         # Fallback in-memory
+        if not cls._fallback_keywords:
+            await cls._seed_default_keywords()
         results = []
         for kw, doc in cls._fallback_keywords.items():
             if enabled_only and not doc.get("enabled", True):

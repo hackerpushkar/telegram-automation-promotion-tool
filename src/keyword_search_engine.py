@@ -46,9 +46,12 @@ class KeywordSearchEngine:
         """
         # Strategy 1: Check active accounts in MongoDB
         accounts = await Database.get_all_telegram_accounts()
-        active_accounts = [a for a in accounts if a.get("status") == "active" and a.get("session_string")]
-        
-        for acc in active_accounts:
+        candidates = [
+            a for a in accounts
+            if a.get("session_string") and a.get("status") not in ["banned", "logged_out", "invalid_session", "revoked"]
+        ]
+
+        for acc in candidates:
             try:
                 client = AccountManager.get_client(acc["session_string"])
                 await client.connect()
@@ -92,18 +95,19 @@ class KeywordSearchEngine:
         if not clean_kw:
             raise ValueError("Keyword cannot be empty.")
 
-        client = await cls.get_authorized_client()
-        if not client:
-            raise RuntimeError(
-                "No authorized Telegram account is available to search. "
-                "Please connect an account in the 'Telegram Accounts' tab first."
-            )
-
         channels_discovered = 0
         leads_extracted_total = 0
         discovered_list = []
+        client = None
 
         try:
+            client = await cls.get_authorized_client()
+            if not client:
+                raise RuntimeError(
+                    "No authorized Telegram account is available to search. "
+                    "Please connect an account in the 'Login Accounts' tab first."
+                )
+
             logger.info("🔍 [KeywordSearch] Executing global search for '%s' (limit: %d)...", clean_kw, limit)
             found = await client(SearchRequest(q=clean_kw, limit=limit))
             raw_chats = found.chats or []
@@ -330,6 +334,17 @@ class KeywordSearchEngine:
             # Inter-keyword rest to maintain healthy MTProto session
             await asyncio.sleep(5.0)
 
+        # Collect any error messages
+        errors = [r.get("message") for r in cycle_results if r.get("status") in ["error", "flood_wait"] and r.get("message")]
+        status = "completed"
+        if errors and total_channels == 0 and total_leads == 0:
+            status = "error"
+            message = errors[0]
+        elif total_channels == 0 and total_leads == 0:
+            message = f"Searched {len(target_batch)} keywords: Top channels were already scanned in recent cycle. Rotating keywords."
+        else:
+            message = f"Discovered {total_channels} channels and extracted {total_leads} leads."
+
         logger.info(
             "🏁 [AutonomousKeywordSearch] Cycle complete! Discovered %d channel(s) and extracted %d lead(s).",
             total_channels, total_leads
@@ -342,8 +357,10 @@ class KeywordSearchEngine:
             pass
 
         return {
-            "status": "completed",
+            "status": status,
+            "message": message,
             "keywords_searched": len(target_batch),
+            "target_keywords": [k["keyword"] for k in target_batch],
             "channels_found": total_channels,
             "leads_extracted": total_leads,
             "details": cycle_results
