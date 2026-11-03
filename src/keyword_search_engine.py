@@ -17,6 +17,7 @@ from telethon.errors import (
 from src.config import settings
 from src.db import Database
 from src.extractor import extract_leads_from_text
+from src.models import Lead, LeadType, LeadStatus, LeadSourceInfo
 from src.account_manager import AccountManager
 
 logger = logging.getLogger("telegram_promotion.keyword_search")
@@ -106,8 +107,40 @@ class KeywordSearchEngine:
             logger.info("🔍 [KeywordSearch] Executing global search for '%s' (limit: %d)...", clean_kw, limit)
             found = await client(SearchRequest(q=clean_kw, limit=limit))
             raw_chats = found.chats or []
-            logger.info("🔍 [KeywordSearch] Found %d total chat entities for '%s'.", len(raw_chats), clean_kw)
+            raw_users = found.users or []
+            logger.info(
+                "🔍 [KeywordSearch] Directory returned %d chat(s) and %d user/bot entity(ies) for '%s'.",
+                len(raw_chats), len(raw_users), clean_kw
+            )
 
+            # --- Phase A: Extract direct public bot and user entities from SearchRequest ---
+            for u in raw_users:
+                u_username = getattr(u, "username", None)
+                if not u_username:
+                    continue
+                is_bot = getattr(u, "bot", False) or u_username.lower().endswith("bot")
+                lead_type_enum = LeadType.BOT if is_bot else LeadType.USER
+                clean_handle = u_username.strip().lstrip("@")
+
+                lead = Lead(
+                    username=f"@{clean_handle}",
+                    username_clean=clean_handle.lower(),
+                    lead_type=lead_type_enum,
+                    status=LeadStatus.PENDING,
+                    first_seen_at=datetime.utcnow(),
+                    extracted_from=LeadSourceInfo(
+                        source_name=f"Telegram Directory: '{clean_kw}'",
+                        source_invite_link=f"https://t.me/{clean_handle}",
+                        platform="telegram",
+                        source_id=f"keyword_search_user:{clean_kw}"
+                    )
+                )
+                is_new, _ = await Database.upsert_lead(lead)
+                if is_new:
+                    leads_extracted_total += 1
+                    logger.info("  ✨ [DIRECT SEARCH LEAD] @%s (%s)", clean_handle, lead_type_enum.value)
+
+            # --- Phase B: Scan channels and groups for bio + recent message contacts ---
             for chat in raw_chats:
                 # We target public broadcast channels and mega-groups
                 if not isinstance(chat, (Channel, Chat)):
@@ -119,13 +152,14 @@ class KeywordSearchEngine:
                 if not channel_id:
                     continue
 
-                # Deduplication check: skip if scanned in the last 7 days
-                recently_scanned = await Database.is_channel_recently_scanned(channel_id, cooldown_days=7)
+                # Deduplication check: skip if scanned in the last 3 days
+                recently_scanned = await Database.is_channel_recently_scanned(channel_id, cooldown_days=3)
                 if recently_scanned:
                     logger.debug("Skipping recently scanned channel: %s (ID: %d)", title, channel_id)
                     continue
 
                 bio_text = ""
+                recent_text = ""
                 subscribers_count = getattr(chat, "participants_count", None)
 
                 try:
@@ -143,12 +177,22 @@ class KeywordSearchEngine:
                 except Exception as ex:
                     logger.debug("Could not get full channel for %s: %s", title, ex)
 
-                # Extract leads from bio text
+                # Inspect recent pinned / latest channel messages for contact handles
+                try:
+                    messages = await client.get_messages(chat, limit=3)
+                    if messages:
+                        msg_texts = [m.text for m in messages if hasattr(m, "text") and m.text]
+                        recent_text = "\n".join(msg_texts)
+                except Exception:
+                    recent_text = ""
+
+                # Extract leads from combined bio text and recent messages
+                combined_context = f"{bio_text}\n{recent_text}".strip()
                 extracted_leads = []
                 invite_link = f"https://t.me/{username}" if username else None
-                if bio_text:
+                if combined_context:
                     extracted_leads = extract_leads_from_text(
-                        bio_text=bio_text,
+                        bio_text=combined_context,
                         source_name=title,
                         source_invite_link=invite_link or f"tg://resolve?domain={channel_id}",
                         source_id=f"keyword_search:{clean_kw}"
@@ -233,7 +277,7 @@ class KeywordSearchEngine:
                 await client.disconnect()
 
     @classmethod
-    async def run_autonomous_cycle(cls, max_keywords: int = 2) -> Dict[str, Any]:
+    async def run_autonomous_cycle(cls, max_keywords: int = 3) -> Dict[str, Any]:
         """
         Executes one autonomous search cycle:
         Selects oldest searched enabled keywords and executes discovery safely.

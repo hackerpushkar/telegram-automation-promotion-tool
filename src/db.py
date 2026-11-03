@@ -290,38 +290,66 @@ class Database:
 
     @classmethod
     async def _seed_default_keywords(cls):
-        """Seeds standard deal and affiliate keywords if none exist."""
+        """Seeds standard deal and affiliate keywords if none exist or adds missing ones."""
         keywords_col = cls.get_search_keywords_collection()
         if keywords_col is not None:
-            count = await keywords_col.count_documents({})
-            if count == 0:
-                defaults = [
-                    {"keyword": "loot deals", "category": "deals"},
-                    {"keyword": "amazon deals", "category": "amazon"},
-                    {"keyword": "flipkart deals", "category": "flipkart"},
-                    {"keyword": "shopping offers", "category": "deals"},
-                    {"keyword": "discount coupons", "category": "coupons"},
-                    {"keyword": "telegram deals", "category": "deals"},
-                    {"keyword": "loot offers", "category": "deals"},
-                    {"keyword": "free loot", "category": "loot"},
-                    {"keyword": "affiliate deals", "category": "affiliate"},
-                ]
-                now = datetime.utcnow()
-                for d in defaults:
-                    doc = {
-                        "keyword": d["keyword"],
-                        "category": d["category"],
-                        "enabled": True,
-                        "total_channels_found": 0,
-                        "total_leads_extracted": 0,
-                        "last_searched_at": None,
-                        "created_at": now
-                    }
-                    try:
-                        await keywords_col.insert_one(doc)
-                    except Exception:
-                        pass
-                logger.info("Pre-seeded %d default target search keywords.", len(defaults))
+            defaults = [
+                {"keyword": "loot deals", "category": "deals"},
+                {"keyword": "amazon deals", "category": "amazon"},
+                {"keyword": "flipkart deals", "category": "flipkart"},
+                {"keyword": "shopping offers", "category": "deals"},
+                {"keyword": "discount coupons", "category": "coupons"},
+                {"keyword": "telegram deals", "category": "deals"},
+                {"keyword": "loot offers", "category": "deals"},
+                {"keyword": "free loot", "category": "loot"},
+                {"keyword": "affiliate deals", "category": "affiliate"},
+                {"keyword": "deal bot", "category": "bot"},
+                {"keyword": "loot bot", "category": "bot"},
+                {"keyword": "coupon bot", "category": "bot"},
+                {"keyword": "deals alert", "category": "deals"},
+                {"keyword": "myntra deals", "category": "myntra"},
+                {"keyword": "ajio deals", "category": "ajio"},
+                {"keyword": "cashback offers", "category": "cashback"},
+                {"keyword": "promo codes", "category": "coupons"},
+                {"keyword": "price drops", "category": "deals"},
+                {"keyword": "secret loot", "category": "loot"},
+                {"keyword": "shopping loot", "category": "shopping"},
+                {"keyword": "best deals india", "category": "deals"},
+                {"keyword": "coupon code", "category": "coupons"},
+                {"keyword": "tech deals", "category": "tech"},
+                {"keyword": "fashion deals", "category": "fashion"},
+                {"keyword": "groceries loot", "category": "groceries"},
+                {"keyword": "freebies india", "category": "loot"},
+                {"keyword": "refer and earn", "category": "affiliate"},
+                {"keyword": "telegram offer", "category": "offers"},
+                {"keyword": "daily loot", "category": "loot"},
+                {"keyword": "loot tricks", "category": "tricks"},
+                {"keyword": "hidden deals", "category": "deals"},
+                {"keyword": "flash sale", "category": "sales"},
+                {"keyword": "loot update", "category": "loot"},
+                {"keyword": "e-commerce loot", "category": "ecommerce"},
+                {"keyword": "amazon loot tricks", "category": "amazon"}
+            ]
+            now = datetime.utcnow()
+            for d in defaults:
+                doc = {
+                    "keyword": d["keyword"],
+                    "category": d["category"],
+                    "enabled": True,
+                    "total_channels_found": 0,
+                    "total_leads_extracted": 0,
+                    "last_searched_at": None,
+                    "created_at": now
+                }
+                try:
+                    await keywords_col.update_one(
+                        {"keyword": d["keyword"]},
+                        {"$setOnInsert": doc},
+                        upsert=True
+                    )
+                except Exception:
+                    pass
+            logger.info("Verified %d target search keywords in database.", len(defaults))
 
     @classmethod
     async def upsert_lead(cls, lead: Lead) -> Tuple[bool, str]:
@@ -1368,7 +1396,7 @@ class Database:
         return True
 
     @classmethod
-    async def is_channel_recently_scanned(cls, channel_id: int, cooldown_days: int = 7) -> bool:
+    async def is_channel_recently_scanned(cls, channel_id: int, cooldown_days: int = 3) -> bool:
         """Checks if a channel was scanned recently within the cooldown window."""
         channels_col = cls.get_discovered_channels_collection()
         now = datetime.utcnow()
