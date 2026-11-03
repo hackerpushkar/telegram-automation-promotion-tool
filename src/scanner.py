@@ -60,8 +60,16 @@ class TelegramBioScanner:
         """
         Inspects a source channel's bio/description using Telegram MTProto and extracts leads.
         """
-        if not self.client or not self.client.is_connected():
-            logger.warning("[Scanner] Client not connected. Cannot scan source: %s", source.name)
+        client = self.client
+        disconnect_custom = False
+
+        if not client or not client.is_connected():
+            from src.keyword_search_engine import KeywordSearchEngine
+            client = await KeywordSearchEngine.get_authorized_client()
+            disconnect_custom = True
+
+        if not client:
+            logger.warning("[Scanner] No authorized Telegram account available to scan source: %s", source.name)
             return []
 
         invite_link = source.inviteLink or ""
@@ -74,13 +82,13 @@ class TelegramBioScanner:
                 invite_hash = hash_match.group(1)
                 logger.info("[Scanner] Inspecting private invite link hash '%s' for '%s'...", invite_hash, source.name)
                 try:
-                    invite_info = await self.client(functions.messages.CheckChatInviteRequest(invite_hash))
+                    invite_info = await client(functions.messages.CheckChatInviteRequest(invite_hash))
                     if isinstance(invite_info, types.ChatInvite):
                         bio_text = getattr(invite_info, "about", "") or ""
                     elif isinstance(invite_info, types.ChatInviteAlready):
                         # Already joined, fetch full entity
                         entity = invite_info.chat
-                        full = await self.client(functions.channels.GetFullChannelRequest(entity))
+                        full = await client(functions.channels.GetFullChannelRequest(entity))
                         bio_text = full.full_chat.about or ""
                 except (InviteHashExpiredError, InviteHashInvalidError) as e:
                     logger.warning("[Scanner] Invalid or expired invite link for '%s': %s", source.name, e)
@@ -92,8 +100,8 @@ class TelegramBioScanner:
                 target = user_match.group(1) if user_match else (source.chatId or "")
                 if target:
                     logger.info("[Scanner] Resolving public entity '%s' for '%s'...", target, source.name)
-                    entity = await self.client.get_entity(target)
-                    full = await self.client(functions.channels.GetFullChannelRequest(entity))
+                    entity = await client.get_entity(target)
+                    full = await client(functions.channels.GetFullChannelRequest(entity))
                     bio_text = full.full_chat.about or ""
 
             if not bio_text:
@@ -123,3 +131,6 @@ class TelegramBioScanner:
         except Exception as e:
             logger.exception("[Scanner] Error scanning channel '%s': %s", source.name, e)
             return []
+        finally:
+            if disconnect_custom and client and client.is_connected():
+                await client.disconnect()

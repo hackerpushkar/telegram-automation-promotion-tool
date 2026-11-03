@@ -420,6 +420,12 @@ async def complete_account_login_endpoint(req: CompleteAccountLoginRequest):
         if res.get("status") == "success":
             acc = res.get("account", {})
             log_activity(f"Connected Telegram account {acc.get('phone')} (Ready for Rotation)", "sync")
+            # Automatically launch background discovery cycle now that an account is ready
+            try:
+                from src.keyword_search_engine import KeywordSearchEngine
+                asyncio.create_task(KeywordSearchEngine.run_autonomous_cycle(max_keywords=2))
+            except Exception as ex:
+                logger.warning("Could not launch discovery cycle on account connect: %s", ex)
         return res
     except Exception as e:
         logger.error("Failed to complete phone login: %s", e)
@@ -565,15 +571,43 @@ async def export_sending_reports_csv(status: Optional[str] = Query(None)):
     )
 
 # 7. Utilities & Manual Trigger
+@app.post("/api/discovery/trigger-now")
+async def trigger_discovery_now_endpoint():
+    """Triggers an immediate autonomous keyword search cycle across active keywords."""
+    log_activity("Autonomous lead discovery cycle initiated by admin from Web UI.", "sync")
+    from src.keyword_search_engine import KeywordSearchEngine
+    try:
+        res = await KeywordSearchEngine.run_autonomous_cycle(max_keywords=3)
+        channels = res.get("channels_found", 0)
+        leads = res.get("leads_extracted", 0)
+        msg = f"Discovered {channels} channels and extracted {leads} leads."
+        log_activity(f"Discovery cycle finished: {msg}", "lead")
+        return {
+            "status": "success",
+            "message": msg,
+            "channels_found": channels,
+            "leads_extracted": leads
+        }
+    except Exception as e:
+        logger.error("Error executing manual discovery cycle: %s", e)
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
+
 @app.post("/api/trigger-sync")
 async def trigger_manual_sync():
-    """Triggers an immediate external source fetch from ProAffiliaters API."""
-    log_activity("Manual 30-minute sync cycle initiated by admin from Web UI.", "sync")
+    """Triggers both external API polling and autonomous keyword discovery."""
+    log_activity("Full sync & discovery cycle initiated by admin from Web UI.", "sync")
+    from src.keyword_search_engine import KeywordSearchEngine
+    asyncio.create_task(KeywordSearchEngine.run_autonomous_cycle(max_keywords=3))
+
     api_client = ProaffiliatersApiClient()
     sources = await api_client.fetch_recent_sources()
     if not sources:
-        log_activity("External API sync finished: No new source channels found.", "info")
-        return {"status": "none", "message": "No new sources found in window", "sources_count": 0}
+        log_activity("External API sync finished: No new external sources in window. Autonomous discovery running in background...", "info")
+        return {
+            "status": "success",
+            "message": "Autonomous lead discovery cycle running in background!",
+            "sources_count": 0
+        }
 
     log_activity(f"External API sync found {len(sources)} source channels. Processing...", "lead")
     return {"status": "success", "message": f"Discovered {len(sources)} channels", "sources_count": len(sources)}
@@ -1209,10 +1243,16 @@ HTML_CONTENT = """<!DOCTYPE html>
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
           </button>
 
-          <!-- Sync API Now Button -->
-          <button onclick="triggerSyncNow()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white text-xs font-bold shadow-sm shadow-indigo-500/25 transition-all active:scale-95">
+          <!-- Discover Leads Now Button -->
+          <button id="btn-trigger-discovery" onclick="triggerDiscoveryNow()" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-700 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white text-xs font-bold shadow-sm shadow-indigo-500/25 transition-all active:scale-95">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-            <span>Sync API Now</span>
+            <span>⚡ Discover Leads Now</span>
+          </button>
+
+          <!-- Sync API Now Button -->
+          <button onclick="triggerSyncNow()" title="Poll External ProAffiliaters API" class="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold shadow-2xs transition-all active:scale-95">
+            <svg class="w-3.5 h-3.5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            <span>Sync API</span>
           </button>
         </div>
       </header>
@@ -2925,6 +2965,37 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       } catch (e) {
         console.error('Error loading global stats', e);
+      }
+    }
+
+    async function triggerDiscoveryNow() {
+      const btn = document.getElementById('btn-trigger-discovery');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>⏳ Scanning Channels...</span>';
+      }
+      showToast('Searching Telegram directory for deal channels & extracting leads...', 'info');
+
+      try {
+        const res = await fetch('/api/discovery/trigger-now', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+          showToast(`Discovery complete! Found ${data.channels_found} channels and saved ${data.leads_extracted} leads!`, 'success');
+          await loadLeads();
+          await loadStats();
+        } else {
+          showToast(data.message || 'Discovery cycle failed. Ensure an account is connected.', 'error');
+        }
+      } catch (e) {
+        showToast('Error during discovery: ' + e.message, 'error');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = `
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            <span>⚡ Discover Leads Now</span>
+          `;
+        }
       }
     }
 
