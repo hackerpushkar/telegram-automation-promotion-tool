@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -89,6 +90,8 @@ class DripEngine:
             "timestamp": datetime.utcnow().isoformat()
         }
 
+    _is_running: bool = False
+
     @classmethod
     async def execute_drip_stage(
         cls,
@@ -98,25 +101,40 @@ class DripEngine:
     ) -> Dict[str, Any]:
         """
         Executes a single week/stage batch:
-          1. Connects the account assigned to Slot #stage.
+          1. Connects the account assigned to Slot #stage (or rotates active accounts).
           2. Finds eligible contact bots for that stage.
-          3. Forwards Post #stage from the official channel.
-          4. Advances bot to next stage and records history.
+          3. Forwards Post #stage from the official channel (or sends high-res banner + text).
+          4. Advances bot to next stage (sets 7-day cooldown) and logs sending report.
         """
         if stage < 1 or stage > 5:
             raise ValueError(f"Invalid stage {stage}. Must be between 1 and 5.")
 
+        # Resolve sending account: match assigned_slot, or rotate active accounts
         account = await Database.get_telegram_account_by_slot(stage)
         if not account or account.get("status") != "active":
-            raise ValueError(f"No active Telegram account assigned to Slot #{stage} (Week {stage})!")
+            all_accounts = await Database.get_all_telegram_accounts()
+            active_accounts = [
+                a for a in all_accounts
+                if a.get("status") not in ["banned", "logged_out", "revoked", "invalid_session"]
+                and a.get("session_string")
+            ]
+            if not active_accounts:
+                raise ValueError(f"No active Telegram sending account available to execute Stage #{stage}!")
+            # Rotate account based on stage
+            account = active_accounts[(stage - 1) % len(active_accounts)]
+
+        # Resolve promo content preview and channel post
+        preview = None
+        try:
+            from src.channel_publisher import get_promo_post_preview
+            preview = get_promo_post_preview(stage)
+        except Exception as e:
+            logger.debug("Could not load promo post preview for stage %d: %s", stage, e)
 
         post = await Database.get_published_post(stage)
-        if not post or not post.get("message_id"):
-            raise ValueError(f"Promotional Post #{stage} has not been published to the channel yet!")
-
-        channel_username = post.get("channel_username", settings.promo_channel_username)
-        message_id = post["message_id"]
-        message_link = post.get("message_link", f"https://t.me/{channel_username.lstrip('@')}/{message_id}")
+        channel_username = post.get("channel_username", settings.promo_channel_username) if post else settings.promo_channel_username
+        message_id = post.get("message_id") if post else None
+        message_link = post.get("message_link", f"https://t.me/{channel_username.lstrip('@')}/{message_id}") if (post and message_id) else None
 
         eligible_bots = await Database.get_eligible_bots_for_stage(stage, min_cooldown_days=7, limit=batch_size)
         if not eligible_bots:
@@ -136,8 +154,8 @@ class DripEngine:
         client = AccountManager.get_client(session_str)
 
         logger.info(
-            "🚀 Starting Stage #%d forwarding batch using Account %s (Slot #%d). Target: %d bots. Post #%d.",
-            stage, phone, stage, len(eligible_bots), stage
+            "🚀 Starting Stage #%d promotional batch using Account %s. Target: %d bots. Post #%d.",
+            stage, phone, len(eligible_bots), stage
         )
 
         results = []
@@ -150,11 +168,13 @@ class DripEngine:
                 await Database.update_telegram_account_status(phone, "logged_out")
                 raise RuntimeError(f"Account {phone} session is no longer authorized.")
 
-            # Resolve channel peer
-            try:
-                channel_entity = await client.get_entity(channel_username)
-            except Exception as e:
-                raise RuntimeError(f"Could not resolve channel {channel_username}: {e}")
+            # Resolve channel peer if message_id exists
+            channel_entity = None
+            if message_id:
+                try:
+                    channel_entity = await client.get_entity(channel_username)
+                except Exception as e:
+                    logger.warning("Could not resolve channel %s: %s. Will send directly.", channel_username, e)
 
             for idx, bot_lead in enumerate(eligible_bots, 1):
                 raw_handle = bot_lead.get("username", "").strip()
@@ -164,34 +184,81 @@ class DripEngine:
                     continue
 
                 lead_target = f"@{clean_handle}"
-                logger.info("[%d/%d] Stage #%d: Forwarding Post #%d to %s...", idx, len(eligible_bots), stage, lead_target)
+                logger.info("[%d/%d] Stage #%d: Sending Post #%d to %s...", idx, len(eligible_bots), stage, lead_target)
 
                 try:
                     # Resolve bot entity
                     bot_entity = await client.get_entity(lead_target)
 
-                    # Forward post from channel to contact bot
-                    await client.forward_messages(
-                        entity=bot_entity,
-                        messages=message_id,
-                        from_peer=channel_entity
-                    )
+                    sent_success = False
 
-                    # Advance lead to new stage
+                    # 1. Attempt official channel post forward
+                    if channel_entity and message_id:
+                        try:
+                            await client.forward_messages(
+                                entity=bot_entity,
+                                messages=message_id,
+                                from_peer=channel_entity
+                            )
+                            sent_success = True
+                        except Exception as fwd_err:
+                            logger.warning("Channel forward to %s failed (%s). Falling back to direct promo post...", lead_target, fwd_err)
+
+                    # 2. Fallback: send banner image and text directly
+                    if not sent_success:
+                        caption = (preview.get("caption") if preview else "") or (
+                            "🚀 STILL RUNNING YOUR TELEGRAM DEAL CHANNEL MANUALLY?\n\n"
+                            "Stop wasting hours on manual posting. Let ProAffiliaters automate your workflow!\n\n"
+                            "⚡ Everything You Need:\n"
+                            "- Quick Post - Create deal posts from product links in seconds\n"
+                            "- AutoPilot - Automate deal posting 24/7\n"
+                            "- Custom Templates - Create eye-catching deal posts\n\n"
+                            "🌐 Start Now: https://proaffiliaters.com\n"
+                            "🤖 Support: @ProAffiliatersHelpBot\n"
+                            "📢 Community: @pro_affiliaters"
+                        )
+                        img_path = preview.get("image_path") if preview else None
+                        if img_path and os.path.exists(img_path):
+                            await client.send_file(
+                                entity=bot_entity,
+                                file=img_path,
+                                caption=caption
+                            )
+                        else:
+                            await client.send_message(
+                                entity=bot_entity,
+                                message=caption
+                            )
+                        sent_success = True
+
+                    # Advance lead to new stage (sets 7-day cooldown)
                     new_stage = stage
                     await Database.advance_lead_promo_stage(
                         username_clean=clean_handle,
                         new_stage=new_stage,
                         account_phone=phone,
                         post_number=stage,
-                        message_link=message_link
+                        message_link=message_link or "direct_promo_send"
                     )
+
+                    # Log to Sending Reports collection
+                    snippet = (preview.get("caption", "") if preview else "")[:100] or f"Promotional Post #{stage}"
+                    await Database.save_sending_report({
+                        "recipient_username": clean_handle,
+                        "recipient_type": "bot",
+                        "sender_account_phone": phone,
+                        "sender_account_name": f"{account.get('first_name', '')} {account.get('last_name', '')}".strip() or phone,
+                        "post_title": (preview.get("title") if preview else f"Promotional Post #{stage}"),
+                        "message_snippet": snippet,
+                        "status": "sent",
+                        "sent_at": datetime.utcnow()
+                    })
 
                     successful_count += 1
                     results.append({"username": clean_handle, "status": "sent", "new_stage": new_stage})
-                    logger.info("  ✅ Successfully forwarded to %s! (Advanced to Stage #%d)", lead_target, new_stage)
+                    logger.info("  ✅ Successfully dispatched Promo #%d to %s! (Advanced to Stage #%d)", stage, lead_target, new_stage)
 
-                    # Delay between sends to avoid Telegram spam trigger
+                    # Delay between sends to avoid Telegram rate limits
                     if idx < len(eligible_bots):
                         await asyncio.sleep(delay_seconds)
 
@@ -218,7 +285,7 @@ class DripEngine:
                     failed_count += 1
 
                 except Exception as e:
-                    logger.error("Error forwarding to %s: %s", lead_target, e)
+                    logger.error("Error sending promo to %s: %s", lead_target, e)
                     results.append({"username": clean_handle, "status": "error", "error": str(e)})
                     failed_count += 1
 
@@ -243,3 +310,73 @@ class DripEngine:
             "failed": failed_count,
             "results": results
         }
+
+    @classmethod
+    async def run_autonomous_drip_cycle(cls, batch_per_stage: int = 10) -> Dict[str, Any]:
+        """
+        Master Autonomous Autopilot Runner:
+          1. Identifies newly discovered userbots (Stage 0 / None) and dispatches Promo #1 using Account #1.
+          2. Identifies userbots whose 7-day cooldown expired (Stages 2 to 5) and dispatches the next promo using rotating accounts.
+        """
+        if cls._is_running:
+            logger.info("⏸️ [AutonomousDrip] An automated outreach cycle is already running. Skipping concurrent trigger.")
+            return {"status": "already_running", "total_sent": 0}
+
+        cls._is_running = True
+        logger.info("🤖 [AutonomousDrip] Starting autonomous promotional outreach cycle across 5 stages...")
+
+        try:
+            all_accs = await Database.get_all_telegram_accounts()
+            active_accs = [
+                a for a in all_accs
+                if a.get("status") not in ["banned", "logged_out", "revoked", "invalid_session"]
+                and a.get("session_string")
+            ]
+            if not active_accs:
+                logger.info("⏸️ [AutonomousDrip] No active sending accounts found. Skipping cycle until an account is connected.")
+                return {"status": "no_accounts", "stages_run": 0, "total_sent": 0}
+
+            total_sent = 0
+            stages_summary = []
+
+            # Check all 5 stages in sequence
+            for st in range(1, 6):
+                try:
+                    eligible = await Database.get_eligible_bots_for_stage(st, min_cooldown_days=7, limit=batch_per_stage)
+                    if not eligible:
+                        continue
+
+                    logger.info("🎯 [AutonomousDrip] Found %d bot(s) eligible for Stage #%d.", len(eligible), st)
+                    res = await cls.execute_drip_stage(st, batch_size=batch_per_stage, delay_seconds=12.0)
+                    sent = res.get("successful", 0)
+                    total_sent += sent
+                    stages_summary.append({
+                        "stage": st,
+                        "targeted": len(eligible),
+                        "sent": sent,
+                        "account": res.get("account_phone")
+                    })
+                    # Pause between stages to maintain MTProto session health
+                    if sent > 0 and st < 5:
+                        await asyncio.sleep(5.0)
+                except Exception as e:
+                    logger.error("❌ [AutonomousDrip] Error executing Stage #%d: %s", st, e)
+
+            msg = f"Autonomous Drip complete: Dispatched {total_sent} promotional message(s) across {len(stages_summary)} stage(s)."
+            logger.info("🏁 [AutonomousDrip] %s", msg)
+
+            if total_sent > 0:
+                try:
+                    from src.web import log_activity
+                    log_activity(msg, "lead")
+                except Exception:
+                    pass
+
+            return {
+                "status": "completed",
+                "total_sent": total_sent,
+                "stages": stages_summary
+            }
+
+        finally:
+            cls._is_running = False

@@ -375,6 +375,7 @@ The dashboard is structured around **EXACTLY 4 Production Sections**, completely
 - `DELETE /api/accounts/{phone}` — Removes a registered account from MongoDB.
 - `POST /api/accounts/clear-demo` — Removes mock demo accounts (`+1999...`) from database to clear all slots.
 - `POST /api/config/telegram` — Saves Telegram MTProto credentials (`api_id`, `api_hash`) into active settings and `.env`.
+- `POST /api/drip/trigger-now` — Triggers an immediate autonomous promotional drip cycle across all 5 progressive stages.
 - `GET /api/drip/overview` — Returns 5-week drip funnel breakdown, ready bot counts, and stage mappings.
 - `POST /api/drip/execute-stage` — Executes a single week/stage forwarding batch using that stage's assigned account.
 - `GET /api/keywords` — Returns target keywords overview, active statuses, and KPI metrics.

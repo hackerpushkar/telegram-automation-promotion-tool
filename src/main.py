@@ -17,6 +17,7 @@ from src.api_client import ProaffiliatersApiClient
 from src.scanner import TelegramBioScanner
 from src.info_bot import info_bot
 from src.bot_forwarder import bot_forwarder
+from src.drip_engine import DripEngine
 from src.keyword_search_engine import KeywordSearchEngine
 from src.web import app, log_activity
 
@@ -115,6 +116,11 @@ class Orchestrator:
             logger.info("==================================================================")
             log_activity(f"Cycle finished in {elapsed:.1f}s. Saved: {total_new_leads} new, {total_updated_leads} updated.", "info")
 
+            # Instantly trigger promotional outreach for newly extracted leads
+            if total_new_leads > 0:
+                logger.info("⚡ [SyncCycle] Extracted %d new lead(s). Triggering automated promotional drip...", total_new_leads)
+                asyncio.create_task(DripEngine.run_autonomous_drip_cycle())
+
         except Exception as exc:
             logger.exception("❌ Error occurred during sync cycle: %s", exc)
             log_activity(f"Sync error: {str(exc)}", "info")
@@ -160,6 +166,16 @@ class Orchestrator:
             )
             logger.info("🔍 APScheduler active: Autonomous Keyword Search registered every %d minutes.", kw_minutes)
 
+        # Schedule Autonomous 5-Week Drip Outreach job (runs every 15 minutes)
+        self.scheduler.add_job(
+            DripEngine.run_autonomous_drip_cycle,
+            trigger="interval",
+            minutes=15,
+            id="autonomous_drip_worker",
+            replace_existing=True
+        )
+        logger.info("🤖 APScheduler active: Autonomous 5-Week Drip Outreach registered every 15 minutes.")
+
         # Trigger one initial cycle in background
         asyncio.create_task(self.run_sync_cycle())
 
@@ -174,6 +190,17 @@ class Orchestrator:
                     logger.error("[AutoStartup] Error during initial keyword cycle: %s", e)
 
             asyncio.create_task(initial_auto_keyword_cycle())
+
+        async def initial_auto_drip_cycle():
+            # Wait 10 seconds for clients to connect, then process uncontacted userbots
+            await asyncio.sleep(10.0)
+            try:
+                logger.info("🚀 [AutoStartup] Checking for uncontacted userbots to dispatch Promo #1...")
+                await DripEngine.run_autonomous_drip_cycle()
+            except Exception as e:
+                logger.error("[AutoStartup] Error during initial promotional drip check: %s", e)
+
+        asyncio.create_task(initial_auto_drip_cycle())
 
     async def stop(self):
         """Clean shutdown of scheduler, scanner, info bot, forwarder, and database."""

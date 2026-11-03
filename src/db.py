@@ -1059,6 +1059,7 @@ class Database:
             # Stage 1: Bots never messaged or with promo_stage == 0
             mongo_query = {
                 "lead_type": "bot",
+                "status": {"$ne": "ignored"},
                 "$or": [
                     {"promo_stage": {"$exists": False}},
                     {"promo_stage": 0},
@@ -1071,6 +1072,7 @@ class Database:
             cutoff_date = now - timedelta(days=min_cooldown_days)
             mongo_query = {
                 "lead_type": "bot",
+                "status": {"$ne": "ignored"},
                 "promo_stage": stage - 1,
                 "last_promo_sent_at": {"$lte": cutoff_date}
             }

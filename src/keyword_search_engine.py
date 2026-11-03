@@ -350,6 +350,15 @@ class KeywordSearchEngine:
             total_channels, total_leads
         )
 
+        # Automatically dispatch promotional outreach to newly discovered leads
+        if total_leads > 0:
+            logger.info("⚡ [AutonomousKeywordSearch] Extracted %d new lead(s). Triggering automated promotional drip...", total_leads)
+            try:
+                from src.drip_engine import DripEngine
+                asyncio.create_task(DripEngine.run_autonomous_drip_cycle())
+            except Exception as e:
+                logger.error("Failed to trigger autonomous drip after discovery: %s", e)
+
         try:
             from src.web import log_activity
             log_activity(f"🏁 Autonomous search cycle complete: {total_channels} channels discovered, {total_leads} leads saved to MongoDB.", "sync")

@@ -649,6 +649,14 @@ async def trigger_discovery_now_endpoint():
             log_activity(f"Discovery notice: {msg}", "info")
             return JSONResponse(status_code=400, content={"status": "error", "message": msg, "channels_found": 0, "leads_extracted": 0})
 
+        # Automatically dispatch promotional outreach to newly discovered leads
+        if leads > 0:
+            try:
+                from src.drip_engine import DripEngine
+                asyncio.create_task(DripEngine.run_autonomous_drip_cycle())
+            except Exception as drip_err:
+                logger.error("Failed to trigger autonomous drip after discovery: %s", drip_err)
+
         log_activity(f"Discovery cycle finished: {msg}", "lead")
         return {
             "status": "success",
@@ -659,6 +667,21 @@ async def trigger_discovery_now_endpoint():
     except Exception as e:
         logger.error("Error executing manual discovery cycle: %s", e)
         return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
+
+@app.post("/api/drip/trigger-now")
+async def trigger_drip_now_endpoint():
+    """Triggers an immediate autonomous promotional drip cycle across all 5 progressive stages."""
+    log_activity("Autonomous promotional drip cycle initiated by admin from Web UI.", "sync")
+    try:
+        from src.drip_engine import DripEngine
+        res = await DripEngine.run_autonomous_drip_cycle()
+        total_sent = res.get("total_sent", 0)
+        msg = f"Autonomous drip cycle complete: Dispatched {total_sent} promotional message(s)."
+        log_activity(msg, "lead")
+        return {"status": "success", "message": msg, "result": res}
+    except Exception as e:
+        logger.error("Error executing manual drip cycle: %s", e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 @app.post("/api/trigger-sync")
 async def trigger_manual_sync():
