@@ -10,8 +10,8 @@
 ## 📊 Project Status Dashboard
 
 - **Project Name**: Telegram Promotion Tool
-- **Current Phase**: Phase 20 Complete - Fully Automated 5-Week Progressive Promotional Drip Pipeline
-- **Last Updated**: 2026-11-03 15:10 IST
+- **Current Phase**: Phase 21 Complete - MTProto Entity Verification & Channel/Group Filtration
+- **Last Updated**: 2026-11-03 15:25 IST
 - **Target Integration**: ProAffiliaters External Sources API (`https://app.proaffiliaters.com`) & Telegram Bot API
 
 ---
@@ -238,6 +238,8 @@
 | **2026-11-03 14:35 IST** | Antigravity AI | Standardized VPS Deployment Path: Configured and documented exact VPS project directory `telegram-automation-promotion-tool` (`cd ~/telegram-automation-promotion-tool` / `cd /root/telegram-automation-promotion-tool`) across `AGENTS.md`, `GEMINI.md`, and `setup.md` for permanent agent reference and seamless updates. | `AGENTS.md`, `GEMINI.md`, `setup.md`, `implementation.md` |
 | **2026-11-03 14:50 IST** | Antigravity AI | Resolved "0 Leads Discovered" & Enhanced Error Transparency: Fixed auto-seeding in `src/db.py` to ensure 35+ keywords are immediately available in memory/MongoDB even if `search_keywords` collection was unseeded. In `src/keyword_search_engine.py`, relaxed authorized account candidate matching to include all non-banned accounts with valid session strings, and moved client acquisition into try block with detailed diagnostic feedback. In `src/web.py`, updated `trigger_discovery_now_endpoint` to report real operational feedback and HTTP 400 errors instead of false-positive "Found 0 channels and saved 0 leads!" toast notifications. Verified 100% test pass on `test_four_sections_api.py` and `test_keyword_search.py`. | `src/db.py`, `src/keyword_search_engine.py`, `src/web.py`, `implementation.md` |
 | **2026-11-03 15:10 IST** | Antigravity AI | Fully Automated 5-Week Progressive Promotional Drip Pipeline: Activated autonomous autopilot so that whenever new userbots are discovered (via Keyword Search or Source Polling), they automatically enter the promotional drip pipeline without any manual intervention. Configured immediate Stage 1 outreach (Post #1 via Account #1) and automated 15-minute background evaluation in `src/main.py`. Configured strict 7-day cooldown enforcement between stages (Stage 1 to 5) rotating across connected accounts (Account #2 for Stage 2, etc.). Updated `src/drip_engine.py` with multi-account fallback and direct banner+text sending resilience, integrated `Database.save_sending_report`, added `POST /api/drip/trigger-now`, and verified 100% with automated test suite `testing_files/test_autonomous_drip_workflow.py`. | `src/drip_engine.py`, `src/main.py`, `src/keyword_search_engine.py`, `src/db.py`, `src/web.py`, `testing_files/test_autonomous_drip_workflow.py`, `projectinfo.md`, `implementation.md` |
+| **2026-11-03 15:25 IST** | Antigravity AI | MTProto Entity Verification & Channel/Group Filtration: Built `src/entity_verifier.py` to inspect extracted handles with Telegram MTProto (`client.get_entity`) and distinguish between `User` (bot vs human), `Channel` (broadcast), and `Group` (megagroup/chat). Ensured only genuine users and bots are stored into the Leads Directory; broadcast channels and groups are automatically excluded from leads (and preserved in `discovered_channels`). Updated `HANDLE_REGEX` with negative lookbehind to ignore email domains (`@gmail`, `@yahoo`, etc.). Added `POST /api/leads/verify-all` and an interactive `Verify & Clean` button in the Leads Directory header. Created automated test suite `testing_files/test_entity_verifier.py` (100% passing). | `src/entity_verifier.py`, `src/extractor.py`, `src/scanner.py`, `src/keyword_search_engine.py`, `src/web.py`, `testing_files/test_entity_verifier.py`, `projectinfo.md`, `implementation.md` |
+
 
 
 

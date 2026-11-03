@@ -17,6 +17,7 @@ from telethon.errors import (
 from src.config import settings
 from src.db import Database
 from src.extractor import extract_leads_from_text
+from src.entity_verifier import verify_telegram_entity
 from src.models import Lead, LeadType, LeadStatus, LeadSourceInfo
 from src.account_manager import AccountManager
 
@@ -202,13 +203,40 @@ class KeywordSearchEngine:
                         source_id=f"keyword_search:{clean_kw}"
                     )
 
-                # Save each extracted lead to MongoDB
+                # Verify and save each extracted lead to MongoDB
                 saved_leads_for_channel = 0
+                verified_leads_for_channel = []
                 for lead in extracted_leads:
-                    saved, _ = await Database.upsert_lead(lead)
-                    if saved:
-                        saved_leads_for_channel += 1
-                        leads_extracted_total += 1
+                    try:
+                        ver = await verify_telegram_entity(client, lead.username)
+                        if ver and ver.get("is_lead"):
+                            lead.lead_type = LeadType.BOT if ver["entity_type"] == "bot" else LeadType.USER
+                            saved, _ = await Database.upsert_lead(lead)
+                            if saved:
+                                saved_leads_for_channel += 1
+                                leads_extracted_total += 1
+                                verified_leads_for_channel.append(lead)
+                        elif ver and not ver.get("is_lead"):
+                            logger.info(
+                                "⏩ [KeywordSearch] Excluding @%s from leads: detected as a %s (not a user account).",
+                                lead.username, ver.get("entity_type")
+                            )
+                        else:
+                            # Fallback: only save if clearly identified as bot
+                            if lead.lead_type == LeadType.BOT:
+                                saved, _ = await Database.upsert_lead(lead)
+                                if saved:
+                                    saved_leads_for_channel += 1
+                                    leads_extracted_total += 1
+                                    verified_leads_for_channel.append(lead)
+                    except Exception as ver_err:
+                        logger.debug("Verification error for @%s: %s", lead.username, ver_err)
+                        if lead.lead_type == LeadType.BOT:
+                            saved, _ = await Database.upsert_lead(lead)
+                            if saved:
+                                saved_leads_for_channel += 1
+                                leads_extracted_total += 1
+                                verified_leads_for_channel.append(lead)
 
                 # Save channel to discovered_channels
                 channel_doc = {
@@ -219,7 +247,7 @@ class KeywordSearchEngine:
                     "subscribers_count": subscribers_count or 0,
                     "bio": bio_text[:500] if bio_text else None,
                     "matching_keyword": clean_kw,
-                    "extracted_leads_count": len(extracted_leads),
+                    "extracted_leads_count": saved_leads_for_channel,
                     "status": "scanned"
                 }
                 await Database.save_discovered_channel(channel_doc)
@@ -229,8 +257,8 @@ class KeywordSearchEngine:
                     "title": title,
                     "username": username,
                     "subscribers": subscribers_count or 0,
-                    "leads_found": len(extracted_leads),
-                    "leads": [l.username for l in extracted_leads]
+                    "leads_found": saved_leads_for_channel,
+                    "leads": [l.username for l in verified_leads_for_channel]
                 })
 
                 logger.info(

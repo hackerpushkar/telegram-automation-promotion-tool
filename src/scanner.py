@@ -11,8 +11,9 @@ from telethon.errors import (
     UsernameInvalidError
 )
 from src.config import settings
-from src.models import SourceChannel, Lead
+from src.models import SourceChannel, Lead, LeadType
 from src.extractor import extract_leads_from_text
+from src.entity_verifier import verify_telegram_entity
 
 logger = logging.getLogger(__name__)
 
@@ -111,15 +112,38 @@ class TelegramBioScanner:
             logger.info("[Scanner] Fetched bio for '%s' (%d chars). Parsing leads...", source.name, len(bio_text))
 
             # Extract leads (users & bots) from bio text
-            leads = extract_leads_from_text(
+            raw_leads = extract_leads_from_text(
                 bio_text=bio_text,
                 source_name=source.name or "Unknown Channel",
                 source_invite_link=invite_link,
                 source_id=source.id or ""
             )
 
-            logger.info("[Scanner] Extracted %d lead(s) from '%s'", len(leads), source.name)
-            return leads
+            # Verify each candidate entity with MTProto to exclude channels/groups
+            verified_leads = []
+            for lead in raw_leads:
+                try:
+                    ver = await verify_telegram_entity(client, lead.username)
+                    if ver and ver.get("is_lead"):
+                        # Ensure accurate classification
+                        lead.lead_type = LeadType.BOT if ver["entity_type"] == "bot" else LeadType.USER
+                        verified_leads.append(lead)
+                    elif ver and not ver.get("is_lead"):
+                        logger.info(
+                            "⏩ [Scanner] Excluding @%s from bio of '%s': detected as a %s (not a user account).",
+                            lead.username, source.name, ver.get("entity_type")
+                        )
+                    else:
+                        # Fallback if unresolvable: only keep if ends with bot
+                        if lead.lead_type == LeadType.BOT:
+                            verified_leads.append(lead)
+                except Exception as ver_err:
+                    logger.debug("Verification error for @%s: %s", lead.username, ver_err)
+                    if lead.lead_type == LeadType.BOT:
+                        verified_leads.append(lead)
+
+            logger.info("[Scanner] Extracted & verified %d lead(s) from '%s'", len(verified_leads), source.name)
+            return verified_leads
 
         except FloodWaitError as e:
             logger.warning("[Scanner] Telegram FloodWait hit! Need to wait %d seconds.", e.seconds)

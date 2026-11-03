@@ -2,14 +2,20 @@ import re
 from typing import List, Set
 from src.models import Lead, LeadType, LeadSourceInfo, LeadStatus
 
-# Regex to detect @usernames and t.me/ links
-HANDLE_REGEX = re.compile(r'(?:@|https?://t\.me/|t\.me/|telegram\.me/)([a-zA-Z0-9_]{4,32})', re.IGNORECASE)
+# Regex to detect @usernames and t.me/ links.
+# Uses negative lookbehind (?<![a-zA-Z0-9._%+-]) so email addresses like user@gmail.com do NOT match.
+HANDLE_REGEX = re.compile(
+    r'(?:(?<![a-zA-Z0-9._%+-])@|(?:https?://)?(?:t\.me|telegram\.me)/)([a-zA-Z0-9_]{4,32})',
+    re.IGNORECASE
+)
 
-# Ignored routes / system links on Telegram that are not user or bot usernames
+# Ignored routes, email domains, and system paths that are not user or bot usernames
 IGNORED_SYSTEM_NAMES = {
     "joinchat", "addstickers", "share", "iv", "proxy", "socks",
     "setlanguage", "invoice", "telegram", "channel", "login",
-    "contact", "terms", "privacy", "support"
+    "contact", "terms", "privacy", "support", "help",
+    "gmail", "yahoo", "hotmail", "outlook", "icloud", "protonmail", "mail",
+    "admin", "administrator"
 }
 
 

@@ -284,6 +284,29 @@ async def delete_lead_endpoint(username_clean: str):
         log_activity(f"Deleted lead @{clean}", "info")
     return {"success": ok}
 
+@app.post("/api/leads/verify-all")
+async def verify_all_leads_endpoint():
+    """
+    Audits all stored leads with Telegram MTProto.
+    Removes any handles that are broadcast channels, supergroups, or system/email domains.
+    Ensures only genuine user accounts and bots remain in the Leads Directory.
+    """
+    try:
+        from src.keyword_search_engine import KeywordSearchEngine
+        from src.entity_verifier import scrub_non_user_leads
+        client = None
+        try:
+            client = await KeywordSearchEngine.get_authorized_client()
+        except Exception:
+            pass
+        res = await scrub_non_user_leads(client)
+        msg = f"Audited {res['total_checked']} leads. Removed {len(res['removed_channels'])} channels, {len(res['removed_groups'])} groups, {len(res['removed_system_or_emails'])} invalid/email domains."
+        log_activity(msg, "lead")
+        return {"status": "success", "message": msg, "result": res}
+    except Exception as e:
+        logger.error("Error verifying leads: %s", e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
 @app.get("/api/leads/export-csv")
 async def export_leads_csv(
     lead_type: Optional[str] = Query("all"),
@@ -1450,6 +1473,11 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
 
             <div class="flex items-center gap-2.5">
+              <button onclick="verifyAndCleanLeads()" id="btn-verify-leads" class="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200/60 text-xs font-bold transition-all active:scale-95 shadow-xs" title="Verify all handles with Telegram to remove channels or groups and keep genuine user/bot accounts only">
+                <svg class="w-4 h-4 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <span>Verify & Clean</span>
+              </button>
+
               <button onclick="openAddLeadModal()" class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm shadow-indigo-500/20 transition-all active:scale-95">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                 <span>Add Lead</span>
@@ -2556,6 +2584,37 @@ HTML_CONTENT = """<!DOCTYPE html>
       const status = document.getElementById('leads-status-select').value;
       const search = document.getElementById('leads-search-input').value.trim();
       window.location.href = `/api/leads/export-csv?lead_type=${currentLeadType}&status=${status}&search=${encodeURIComponent(search)}`;
+    }
+
+    async function verifyAndCleanLeads() {
+      const btn = document.getElementById('btn-verify-leads');
+      const origHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<svg class="w-4 h-4 animate-spin text-amber-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg><span>Verifying...</span>`;
+      }
+      showToast('Auditing leads with Telegram MTProto to filter out channels and groups...', 'info');
+      try {
+        const res = await fetch('/api/leads/verify-all', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+          const rmCh = (data.result.removed_channels || []).length;
+          const rmGr = (data.result.removed_groups || []).length;
+          const rmSys = (data.result.removed_system_or_emails || []).length;
+          showToast(`Audit complete! Removed ${rmCh} channels, ${rmGr} groups, ${rmSys} email domains.`, 'success');
+          loadStats();
+          loadLeads();
+        } else {
+          showToast(data.message || 'Verification failed. Make sure a Telegram account is logged in.', 'error');
+        }
+      } catch (err) {
+        showToast('Network error verifying leads.', 'error');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = origHtml;
+        }
+      }
     }
 
     // Modal Add Lead
