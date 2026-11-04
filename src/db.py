@@ -1037,6 +1037,76 @@ class Database:
     # =========================================================================
 
     @classmethod
+    async def get_eligible_users_for_warmup(
+        cls,
+        stage: int,
+        min_cooldown_days: int = 7,
+        limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """
+        Finds human deal channel owners/admins (lead_type: 'user') eligible for the 2-step anti-ban funnel:
+        - Stage 1: Warmup greeting ('Hi'). promo_stage is 0 or None.
+        - Stage 2: Final promotional post. promo_stage == 1 AND last_promo_sent_at <= now - 7 days.
+        - Stage >= 2: Already received promotional post, excluded permanently.
+        """
+        now = datetime.utcnow()
+        leads_col = cls.get_leads_collection()
+
+        if stage not in [1, 2]:
+            return []
+
+        if stage == 1:
+            # Stage 1: Human users never contacted (promo_stage 0 or None)
+            mongo_query = {
+                "lead_type": "user",
+                "status": {"$ne": "ignored"},
+                "$or": [
+                    {"promo_stage": {"$exists": False}},
+                    {"promo_stage": 0},
+                    {"promo_stage": None}
+                ]
+            }
+        else:
+            # Stage 2: Human users who received greeting at least 7 days ago
+            from datetime import timedelta
+            cutoff_date = now - timedelta(days=min_cooldown_days)
+            mongo_query = {
+                "lead_type": "user",
+                "status": {"$ne": "ignored"},
+                "promo_stage": 1,
+                "last_promo_sent_at": {"$lte": cutoff_date}
+            }
+
+        if leads_col is not None:
+            try:
+                cursor = leads_col.find(mongo_query).sort("first_seen_at", 1).limit(limit)
+                docs = await cursor.to_list(length=limit)
+                for d in docs:
+                    if "_id" in d:
+                        d["id"] = str(d.pop("_id"))
+                return docs
+            except Exception as e:
+                logger.error("MongoDB get_eligible_users_for_warmup error: %s", e)
+
+        # Fallback in-memory
+        from datetime import timedelta
+        cutoff = now - timedelta(days=min_cooldown_days)
+        results = []
+        for lead in cls._fallback_leads.values():
+            if lead.get("lead_type") != "user" or lead.get("status") == "ignored":
+                continue
+            cur_stage = lead.get("promo_stage", 0) or 0
+            if stage == 1 and cur_stage == 0:
+                results.append(lead)
+            elif stage == 2 and cur_stage == 1:
+                last_sent = lead.get("last_promo_sent_at")
+                if last_sent is None or last_sent <= cutoff:
+                    results.append(lead)
+            if len(results) >= limit:
+                break
+        return results
+
+    @classmethod
     async def get_eligible_bots_for_stage(
         cls,
         stage: int,

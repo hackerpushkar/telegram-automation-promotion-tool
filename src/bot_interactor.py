@@ -167,3 +167,4 @@ async def prepare_bot_for_promo(
     except Exception as e:
         logger.warning("⚠️ [BotHandshake] Handshake error with %s: %s. Will attempt direct promo.", display_name, e)
         return True
+
