@@ -6,6 +6,11 @@ This folder contains 5 high-converting, professional promotional posts and corre
 
 ## 📁 Kit Contents
 
+### 0. All-In-One Flagship Suite (Full Ecosystem)
+- **Text File**: `all_in_one_proaffiliaters_text.txt`
+- **Image Banner**: `all_in_one_proaffiliaters_banner.png`
+- **Core Hook**: Comprehensive all-in-one suite covering AutoPilot, Quick Post, Custom Templates, Multi-Channel Posting, Smart Auto-Delete, and Link Shortening. Ideal for group blasts, flagship promo outreach, and high-impact acquisition campaigns.
+
 ### 1. Post 1: Automate Your Telegram Deal Channels
 - **Text File**: `1st Text.txt`
 - **Image Banner**: `1st Image.png`
