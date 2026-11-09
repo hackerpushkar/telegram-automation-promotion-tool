@@ -10,8 +10,8 @@
 ## 📊 Project Status Dashboard
 
 - **Project Name**: Telegram Promotion Tool
-- **Current Phase**: Phase 24 Complete - All-In-One Ecosystem Flagship Creative Kit (Full Services Banner & Copy)
-- **Last Updated**: 2026-11-06 08:32 IST
+- **Current Phase**: Phase 25 Complete - Multi-Account Load Balancing & Resilient Sending Pipeline (Manual Sending Fix, PeerFlood Auto-Failover & Queue Unlock)
+- **Last Updated**: 2026-11-09 09:27 IST
 - **Target Integration**: ProAffiliaters External Sources API (`https://app.proaffiliaters.com`) & Telegram Bot API
 
 ---
@@ -197,6 +197,18 @@
   - `GET /api/info-bot/broadcasts`
 - [x] Verified full suite with automated tests (`testing_files/test_four_sections_api.py`) and Playwright UI tests (`testing_files/verify_infobot_ui.py` & `testing_files/verify_sidebar_ui.py`) with 0 errors. Saved verification artifact `infobot_section_verified.png`.
 
+### Phase 25: Multi-Account Load Balancing & Resilient Sending Pipeline
+- [x] Diagnosed lead dispatch bottleneck on production VPS: 137 leads pending, Account #1 hit Telegram PeerFlood limit on Nov 3rd, Accounts #2 and #3 sat at 0 sends.
+- [x] Fixed Manual Sending HTTP 500 error: Harmonized parameter names (`title`/`post_title`, `custom_recipients`/`custom_leads`) and return value handling between `src/web.py` and `src/delivery_engine.py`.
+- [x] Expanded `DeliveryEngine` uncontacted target query to include both `{"status": {"$in": ["new", "pending"]}}`.
+- [x] Fixed Bot Handshake check in `DeliveryEngine` (`report_type in ["bot", "userbot"] or lead_type == "bot"`).
+- [x] Implemented `Database.increment_account_send_count` in `src/db.py` tracking daily & lifetime account dispatch metrics.
+- [x] Built resilient multi-account pool rotation & failover in `src/drip_engine.py` for both `execute_drip_stage` and `execute_user_funnel_stage`:
+  - Dynamically pools all healthy active connected accounts (`active_accounts`).
+  - Rotates across accounts for each lead in the batch instead of locking exclusively to Account #1.
+  - Automatically catches `PeerFloodError` and high `FloodWaitError` on an account, places that single account into cooldown, and seamlessly rotates to the next available account in the pool to continue processing remaining leads without aborting.
+- [x] Added automated test suite `testing_files/test_multi_account_failover.py` and verified 100% pass.
+
 ---
 
 ## 📝 Change & Progress Log
@@ -244,6 +256,7 @@
 | **2026-11-06 08:32 IST** | Antigravity AI | Generated All-In-One Ecosystem Flagship Creative Kit: Designed and generated a 16:9 4K SaaS promotional banner (`all_in_one_proaffiliaters_banner.png`) showcasing the complete ProAffiliaters ecosystem (AutoPilot, Quick Post, Custom Templates, Multi-Channel Routing, Smart Controls, Link Shortener) with 3D Pixar-style digital marketer and holographic dashboard analytics. Drafted corresponding high-converting copy (`all_in_one_proaffiliaters_text.txt`) and updated `promotion images and text/README.md`. | `promotion images and text/all_in_one_proaffiliaters_banner.png`, `promotion images and text/all_in_one_proaffiliaters_text.txt`, `promotion images and text/README.md`, `implementation.md` |
 | **2026-11-06 08:58 IST** | Antigravity AI | Upgraded Flagship Banner to Full Real-World Services (Scraped from proaffiliaters.com): Redesigned and replaced `all_in_one_proaffiliaters_banner.png` with a comprehensive dark-mode SaaS grid structure featuring all 5 genuine service pillars scraped directly from `https://proaffiliaters.com`: 1. High Commission Campaigns & D2C Brands (up to 50% commission, direct payouts), 2. 3-Tier Automation Engine (Quick Post, Auto Post Feeds, 24/7 AutoPilot), 3. Omnichannel Social Broadcasting (Telegram, WhatsApp, WordPress, Pinterest), 4. Live Trending Deals Engine (verified 70%+ loot deals, out-of-stock auto-delete), 5. Multi-URL Shorteners Hub (Bitly, YOURLS, Cuttly & custom branded domains). Updated copy in `all_in_one_proaffiliaters_text.txt`. | `promotion images and text/all_in_one_proaffiliaters_banner.png`, `promotion images and text/all_in_one_proaffiliaters_text.txt`, `implementation.md` |
 | **2026-11-06 09:02 IST** | Antigravity AI | High-Energy Commercial Ad Banner Re-Design: Replaced graphic with a high-converting sponsored ad billboard creative featuring bold attention-grabbing hook ('STOP POSTING MANUALLY! 🚀 EARN MORE WITH 100% AFFILIATE AUTOMATION'), 3D digital creator holding smartphone with skyrocketing revenue streams, glossy 3D floating app badges for all services (Telegram, WhatsApp, WordPress, Pinterest), 30-Day Free Starter Trial badge, and high-impact CTA button ('GET STARTED FREE 👉 proaffiliaters.com'). | `promotion images and text/all_in_one_proaffiliaters_banner.png`, `implementation.md` |
+| **2026-11-09 09:25 IST** | Antigravity AI | Resolved VPS Dispatch Bottleneck & Multi-Account Load Balancing: Diagnosed why 137 leads were pending on production VPS. Fixed Manual Sending HTTP 500 error (`src/web.py` & `src/delivery_engine.py` parameter mismatch), expanded uncontacted query to include `new` and `pending`, implemented missing `Database.increment_account_send_count`, and re-architected `DripEngine` (`execute_drip_stage` and `execute_user_funnel_stage`) with dynamic multi-account round-robin rotation and automatic `PeerFloodError` failover so that when Account 1 hits Telegram non-contact limits, Accounts 2 and 3 seamlessly take over and finish the batch. Verified with automated test suite `testing_files/test_multi_account_failover.py` (100% passing). | `src/delivery_engine.py`, `src/drip_engine.py`, `src/web.py`, `src/db.py`, `testing_files/test_multi_account_failover.py`, `implementation.md`, `projectinfo.md` |
 
 
 

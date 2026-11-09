@@ -1032,6 +1032,34 @@ class Database:
             return True
         return False
 
+    @classmethod
+    async def increment_account_send_count(cls, phone: str) -> bool:
+        """Increments the daily and lifetime send counts for a Telegram account."""
+        phone = phone.strip()
+        now = datetime.utcnow()
+        accounts_col = cls.get_telegram_accounts_collection()
+        if accounts_col is not None:
+            try:
+                await accounts_col.update_one(
+                    {"phone": phone},
+                    {
+                        "$inc": {"daily_send_count": 1, "total_send_count": 1},
+                        "$set": {"last_active_at": now, "last_send_date": now}
+                    }
+                )
+                return True
+            except Exception as e:
+                logger.error("MongoDB increment_account_send_count error: %s", e)
+
+        if phone in cls._fallback_telegram_accounts:
+            acc = cls._fallback_telegram_accounts[phone]
+            acc["daily_send_count"] = acc.get("daily_send_count", 0) + 1
+            acc["total_send_count"] = acc.get("total_send_count", 0) + 1
+            acc["last_active_at"] = now
+            acc["last_send_date"] = now
+            return True
+        return False
+
     # =========================================================================
     # 5-Week Progressive Drip Forwarding Operations
     # =========================================================================

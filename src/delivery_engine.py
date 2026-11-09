@@ -84,12 +84,17 @@ class DeliveryEngine:
         button_url: Optional[str] = None,
         target_type: str = "all_userbots",  # all_userbots, all_usernames, uncontacted, custom
         custom_recipients: Optional[List[str]] = None,
+        custom_leads: Optional[List[str]] = None,
+        post_title: Optional[str] = None,
         delay_seconds: float = 10.0,
         max_per_account: int = 40
     ) -> Dict[str, Any]:
         """
         Executes a delivery campaign rotating across all healthy connected Telegram accounts.
         """
+        campaign_title = (post_title or title or "Promotional Dispatch").strip()
+        all_custom = custom_recipients or custom_leads
+
         if self.is_running:
             raise RuntimeError("A promotional sending campaign is already in progress. Please wait or stop it first.")
 
@@ -110,8 +115,8 @@ class DeliveryEngine:
         leads_col = Database.get_leads_collection()
         recipients: List[Dict[str, Any]] = []
 
-        if target_type == "custom" and custom_recipients:
-            for handle in custom_recipients:
+        if target_type == "custom" and all_custom:
+            for handle in all_custom:
                 clean_handle = handle.strip().replace("@", "")
                 if clean_handle:
                     lead_type = "bot" if clean_handle.lower().endswith("bot") else "user"
@@ -139,12 +144,12 @@ class DeliveryEngine:
 
         elif target_type == "uncontacted":
             if leads_col is not None:
-                cursor = leads_col.find({"status": "new"}, {"_id": 0})
+                cursor = leads_col.find({"status": {"$in": ["new", "pending"]}}, {"_id": 0})
                 recipients = await cursor.to_list(length=1000)
             else:
                 recipients = [
                     lead for lead in Database._fallback_leads.values()
-                    if lead.get("status") == "new"
+                    if lead.get("status") in ["new", "pending"]
                 ]
         else:
             # Default to all leads
@@ -166,7 +171,7 @@ class DeliveryEngine:
         self.current_campaign = {
             "is_running": True,
             "campaign_id": campaign_id,
-            "title": title or "Manual Promotional Post",
+            "title": campaign_title,
             "total_targeted": len(recipients),
             "sent_count": 0,
             "failed_count": 0,
@@ -178,7 +183,7 @@ class DeliveryEngine:
             "logs": []
         }
 
-        self.log_event(f"🚀 Started delivery campaign: '{title}' targeting {len(recipients)} leads with {len(active_accounts)} accounts.")
+        self.log_event(f"🚀 Started delivery campaign: '{campaign_title}' targeting {len(recipients)} leads with {len(active_accounts)} account(s).")
 
         # Launch dispatch loop as background task so API returns immediately
         asyncio.create_task(
@@ -186,7 +191,7 @@ class DeliveryEngine:
                 recipients=recipients,
                 accounts=active_accounts,
                 message_text=message_text,
-                title=title,
+                title=campaign_title,
                 image_url=image_url,
                 button_text=button_text,
                 button_url=button_url,
@@ -270,7 +275,7 @@ class DeliveryEngine:
                     target_peer = f"@{recipient_handle}"
 
                     # If recipient is a bot, execute handshake / language bypass first
-                    if report_type == "bot":
+                    if report_type in ["bot", "userbot"] or lead_type == "bot":
                         try:
                             from src.bot_interactor import prepare_bot_for_promo
                             bot_ent = await client.get_entity(target_peer)

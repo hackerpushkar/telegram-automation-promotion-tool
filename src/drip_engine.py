@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from telethon import TelegramClient
 from telethon.errors import (
     FloodWaitError,
+    PeerFloodError,
     UserIsBlockedError,
     UserPrivacyRestrictedError,
     UsernameInvalidError,
@@ -100,28 +101,32 @@ class DripEngine:
         delay_seconds: float = 12.0
     ) -> Dict[str, Any]:
         """
-        Executes a single week/stage batch:
-          1. Connects the account assigned to Slot #stage (or rotates active accounts).
+        Executes a single week/stage batch with multi-account rotation & failover:
+          1. Connects healthy active accounts (rotates across all active accounts).
           2. Finds eligible contact bots for that stage.
           3. Forwards Post #stage from the official channel (or sends high-res banner + text).
-          4. Advances bot to next stage (sets 7-day cooldown) and logs sending report.
+          4. Automatically fails over to next account if an account encounters PeerFlood or FloodWait.
+          5. Advances bot to next stage (sets 7-day cooldown) and logs sending report.
         """
         if stage < 1 or stage > 5:
             raise ValueError(f"Invalid stage {stage}. Must be between 1 and 5.")
 
-        # Resolve sending account: match assigned_slot, or rotate active accounts
-        account = await Database.get_telegram_account_by_slot(stage)
-        if not account or account.get("status") != "active":
-            all_accounts = await Database.get_all_telegram_accounts()
-            active_accounts = [
-                a for a in all_accounts
-                if a.get("status") not in ["banned", "logged_out", "revoked", "invalid_session"]
-                and a.get("session_string")
-            ]
-            if not active_accounts:
-                raise ValueError(f"No active Telegram sending account available to execute Stage #{stage}!")
-            # Rotate account based on stage
-            account = active_accounts[(stage - 1) % len(active_accounts)]
+        # 1. Fetch all active sending accounts
+        all_accounts = await Database.get_all_telegram_accounts()
+        active_accounts = [
+            a for a in all_accounts
+            if a.get("status") == "active" and a.get("session_string")
+        ]
+        if not active_accounts:
+            raise ValueError(f"No active Telegram sending account available to execute Stage #{stage}!")
+
+        # Prioritize slot-assigned account if present, but pool all active accounts
+        slot_acc = await Database.get_telegram_account_by_slot(stage)
+        if slot_acc and slot_acc.get("status") == "active" and slot_acc in active_accounts:
+            active_accounts.remove(slot_acc)
+            active_accounts.insert(0, slot_acc)
+
+        account_pool: List[Dict[str, Any]] = list(active_accounts)
 
         # Resolve promo content preview and channel post
         preview = None
@@ -149,33 +154,18 @@ class DripEngine:
                 "results": []
             }
 
-        session_str = account["session_string"]
-        phone = account["phone"]
-        client = AccountManager.get_client(session_str)
-
         logger.info(
-            "🚀 Starting Stage #%d promotional batch using Account %s. Target: %d bots. Post #%d.",
-            stage, phone, len(eligible_bots), stage
+            "🚀 Starting Stage #%d promotional batch with %d account(s). Target: %d bots. Post #%d.",
+            stage, len(account_pool), len(eligible_bots), stage
         )
 
         results = []
         successful_count = 0
         failed_count = 0
+        account_clients: Dict[str, TelegramClient] = {}
+        account_idx = 0
 
         try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                await Database.update_telegram_account_status(phone, "logged_out")
-                raise RuntimeError(f"Account {phone} session is no longer authorized.")
-
-            # Resolve channel peer if message_id exists
-            channel_entity = None
-            if message_id:
-                try:
-                    channel_entity = await client.get_entity(channel_username)
-                except Exception as e:
-                    logger.warning("Could not resolve channel %s: %s. Will send directly.", channel_username, e)
-
             for idx, bot_lead in enumerate(eligible_bots, 1):
                 raw_handle = bot_lead.get("username", "").strip()
                 clean_handle = bot_lead.get("username_clean", "").strip() or raw_handle.lstrip("@").lower()
@@ -184,123 +174,189 @@ class DripEngine:
                     continue
 
                 lead_target = f"@{clean_handle}"
-                logger.info("[%d/%d] Stage #%d: Sending Post #%d to %s...", idx, len(eligible_bots), stage, lead_target)
+                bot_dispatched = False
 
-                try:
-                    # Resolve bot entity
-                    bot_entity = await client.get_entity(lead_target)
+                while not bot_dispatched and account_pool:
+                    current_acc = account_pool[account_idx % len(account_pool)]
+                    phone = current_acc["phone"]
+                    session_str = current_acc["session_string"]
 
-                    # Bot Handshake & Language / Anti-Spam barrier check
-                    try:
-                        from src.bot_interactor import prepare_bot_for_promo
-                        await prepare_bot_for_promo(client, bot_entity, bot_handle=lead_target)
-                    except Exception as hs_err:
-                        logger.debug("Handshake notice on %s: %s", lead_target, hs_err)
-
-                    sent_success = False
-
-                    # 1. Attempt official channel post forward
-                    if channel_entity and message_id:
+                    # Connect or retrieve client
+                    if phone not in account_clients:
                         try:
-                            await client.forward_messages(
-                                entity=bot_entity,
-                                messages=message_id,
-                                from_peer=channel_entity
+                            client = AccountManager.get_client(session_str)
+                            await client.connect()
+                            if not await client.is_user_authorized():
+                                await Database.update_telegram_account_status(phone, "logged_out")
+                                account_pool = [a for a in account_pool if a.get("phone") != phone]
+                                continue
+                            account_clients[phone] = client
+                        except Exception as conn_err:
+                            logger.warning("Failed connecting account %s: %s", phone, conn_err)
+                            account_pool = [a for a in account_pool if a.get("phone") != phone]
+                            continue
+
+                    client = account_clients[phone]
+
+                    # Resolve channel peer if message_id exists
+                    channel_entity = None
+                    if message_id:
+                        try:
+                            channel_entity = await client.get_entity(channel_username)
+                        except Exception as e:
+                            logger.debug("Could not resolve channel %s: %s", channel_username, e)
+
+                    try:
+                        logger.info("[%d/%d] Stage #%d: Sending Post #%d to %s via %s...", idx, len(eligible_bots), stage, lead_target, phone)
+                        # Resolve bot entity
+                        bot_entity = await client.get_entity(lead_target)
+
+                        # Bot Handshake & Language / Anti-Spam barrier check
+                        try:
+                            from src.bot_interactor import prepare_bot_for_promo
+                            await prepare_bot_for_promo(client, bot_entity, bot_handle=lead_target)
+                        except Exception as hs_err:
+                            logger.debug("Handshake notice on %s: %s", lead_target, hs_err)
+
+                        sent_success = False
+
+                        # 1. Attempt official channel post forward
+                        if channel_entity and message_id:
+                            try:
+                                await client.forward_messages(
+                                    entity=bot_entity,
+                                    messages=message_id,
+                                    from_peer=channel_entity
+                                )
+                                sent_success = True
+                            except Exception as fwd_err:
+                                logger.warning("Channel forward to %s failed (%s). Falling back to direct promo post...", lead_target, fwd_err)
+
+                        # 2. Fallback: send banner image and text directly
+                        if not sent_success:
+                            caption = (preview.get("caption") if preview else "") or (
+                                "🚀 STILL RUNNING YOUR TELEGRAM DEAL CHANNEL MANUALLY?\n\n"
+                                "Stop wasting hours on manual posting. Let ProAffiliaters automate your workflow!\n\n"
+                                "⚡ Everything You Need:\n"
+                                "- Quick Post - Create deal posts from product links in seconds\n"
+                                "- AutoPilot - Automate deal posting 24/7\n"
+                                "- Custom Templates - Create eye-catching deal posts\n\n"
+                                "🌐 Start Now: https://proaffiliaters.com\n"
+                                "🤖 Support: @ProAffiliatersHelpBot\n"
+                                "📢 Community: @pro_affiliaters"
                             )
+                            img_path = preview.get("image_path") if preview else None
+                            if img_path and os.path.exists(img_path):
+                                await client.send_file(
+                                    entity=bot_entity,
+                                    file=img_path,
+                                    caption=caption
+                                )
+                            else:
+                                await client.send_message(
+                                    entity=bot_entity,
+                                    message=caption
+                                )
                             sent_success = True
-                        except Exception as fwd_err:
-                            logger.warning("Channel forward to %s failed (%s). Falling back to direct promo post...", lead_target, fwd_err)
 
-                    # 2. Fallback: send banner image and text directly
-                    if not sent_success:
-                        caption = (preview.get("caption") if preview else "") or (
-                            "🚀 STILL RUNNING YOUR TELEGRAM DEAL CHANNEL MANUALLY?\n\n"
-                            "Stop wasting hours on manual posting. Let ProAffiliaters automate your workflow!\n\n"
-                            "⚡ Everything You Need:\n"
-                            "- Quick Post - Create deal posts from product links in seconds\n"
-                            "- AutoPilot - Automate deal posting 24/7\n"
-                            "- Custom Templates - Create eye-catching deal posts\n\n"
-                            "🌐 Start Now: https://proaffiliaters.com\n"
-                            "🤖 Support: @ProAffiliatersHelpBot\n"
-                            "📢 Community: @pro_affiliaters"
+                        # Advance lead to new stage (sets 7-day cooldown)
+                        new_stage = stage
+                        await Database.advance_lead_promo_stage(
+                            username_clean=clean_handle,
+                            new_stage=new_stage,
+                            account_phone=phone,
+                            post_number=stage,
+                            message_link=message_link or "direct_promo_send"
                         )
-                        img_path = preview.get("image_path") if preview else None
-                        if img_path and os.path.exists(img_path):
-                            await client.send_file(
-                                entity=bot_entity,
-                                file=img_path,
-                                caption=caption
-                            )
+                        await Database.increment_account_send_count(phone)
+
+                        # Log to Sending Reports collection
+                        snippet = (preview.get("caption", "") if preview else "")[:100] or f"Promotional Post #{stage}"
+                        await Database.save_sending_report({
+                            "recipient_username": clean_handle,
+                            "recipient_type": "bot",
+                            "sender_account_phone": phone,
+                            "sender_account_name": f"{current_acc.get('first_name', '')} {current_acc.get('last_name', '')}".strip() or phone,
+                            "post_title": (preview.get("title") if preview else f"Promotional Post #{stage}"),
+                            "message_snippet": snippet,
+                            "status": "sent",
+                            "sent_at": datetime.utcnow()
+                        })
+
+                        successful_count += 1
+                        bot_dispatched = True
+                        results.append({"username": clean_handle, "status": "sent", "new_stage": new_stage, "account": phone})
+                        logger.info("  ✅ Successfully dispatched Promo #%d to %s via %s! (Advanced to Stage #%d)", stage, lead_target, phone, new_stage)
+                        account_idx += 1
+
+                        if idx < len(eligible_bots):
+                            await asyncio.sleep(delay_seconds)
+
+                    except PeerFloodError:
+                        logger.warning("🛑 Telegram PeerFlood on Account %s! Removing from current pool and rotating to next account...", phone)
+                        await Database.update_telegram_account_status(phone, "peer_flood_lock")
+                        account_pool = [a for a in account_pool if a.get("phone") != phone]
+                        if phone in account_clients:
+                            try:
+                                await account_clients[phone].disconnect()
+                            except Exception:
+                                pass
+                            account_clients.pop(phone, None)
+
+                        if not account_pool:
+                            results.append({"username": clean_handle, "status": "peer_flood", "error": "All accounts PeerFlood restricted"})
+                            failed_count += 1
+                            bot_dispatched = True
+                            break
+
+                    except FloodWaitError as e:
+                        logger.warning("Telegram FloodWait of %d seconds on Account %s.", e.seconds, phone)
+                        if e.seconds > 180:
+                            await Database.update_telegram_account_status(phone, f"flood_wait_{e.seconds}s")
+                            account_pool = [a for a in account_pool if a.get("phone") != phone]
+                            if phone in account_clients:
+                                try:
+                                    await account_clients[phone].disconnect()
+                                except Exception:
+                                    pass
+                                account_clients.pop(phone, None)
+                            if not account_pool:
+                                results.append({"username": clean_handle, "status": "flood_wait", "error": f"FloodWait {e.seconds}s"})
+                                failed_count += 1
+                                bot_dispatched = True
+                                break
                         else:
-                            await client.send_message(
-                                entity=bot_entity,
-                                message=caption
-                            )
-                        sent_success = True
+                            await asyncio.sleep(e.seconds + 2)
 
-                    # Advance lead to new stage (sets 7-day cooldown)
-                    new_stage = stage
-                    await Database.advance_lead_promo_stage(
-                        username_clean=clean_handle,
-                        new_stage=new_stage,
-                        account_phone=phone,
-                        post_number=stage,
-                        message_link=message_link or "direct_promo_send"
-                    )
+                    except (UsernameInvalidError, UsernameNotOccupiedError):
+                        logger.warning("Invalid/non-existent bot username: %s. Marking ignored.", lead_target)
+                        await Database.update_lead_status(clean_handle, "ignored")
+                        results.append({"username": clean_handle, "status": "invalid_username", "error": "Username not found"})
+                        failed_count += 1
+                        bot_dispatched = True
 
-                    # Log to Sending Reports collection
-                    snippet = (preview.get("caption", "") if preview else "")[:100] or f"Promotional Post #{stage}"
-                    await Database.save_sending_report({
-                        "recipient_username": clean_handle,
-                        "recipient_type": "bot",
-                        "sender_account_phone": phone,
-                        "sender_account_name": f"{account.get('first_name', '')} {account.get('last_name', '')}".strip() or phone,
-                        "post_title": (preview.get("title") if preview else f"Promotional Post #{stage}"),
-                        "message_snippet": snippet,
-                        "status": "sent",
-                        "sent_at": datetime.utcnow()
-                    })
+                    except (UserPrivacyRestrictedError, UserIsBlockedError) as e:
+                        logger.warning("Privacy restriction or bot blocked by %s: %s", lead_target, e)
+                        results.append({"username": clean_handle, "status": "restricted", "error": str(e)})
+                        failed_count += 1
+                        bot_dispatched = True
 
-                    successful_count += 1
-                    results.append({"username": clean_handle, "status": "sent", "new_stage": new_stage})
-                    logger.info("  ✅ Successfully dispatched Promo #%d to %s! (Advanced to Stage #%d)", stage, lead_target, new_stage)
+                    except Exception as e:
+                        logger.error("Error sending promo to %s via %s: %s", lead_target, phone, e)
+                        results.append({"username": clean_handle, "status": "error", "error": str(e)})
+                        failed_count += 1
+                        bot_dispatched = True
 
-                    # Delay between sends to avoid Telegram rate limits
-                    if idx < len(eligible_bots):
-                        await asyncio.sleep(delay_seconds)
-
-                except FloodWaitError as e:
-                    logger.warning("Telegram FloodWait of %d seconds on Account %s.", e.seconds, phone)
-                    results.append({"username": clean_handle, "status": "flood_wait", "error": f"FloodWait {e.seconds}s"})
-                    failed_count += 1
-                    if e.seconds > 300:
-                        await Database.update_telegram_account_status(phone, f"flood_wait_{e.seconds}s")
-                        logger.error("FloodWait is too high (%ds). Halting batch for Account %s.", e.seconds, phone)
-                        break
-                    else:
-                        await asyncio.sleep(e.seconds + 2)
-
-                except (UsernameInvalidError, UsernameNotOccupiedError):
-                    logger.warning("Invalid/non-existent bot username: %s. Marking ignored.", lead_target)
-                    await Database.update_lead_status(clean_handle, "ignored")
-                    results.append({"username": clean_handle, "status": "invalid_username", "error": "Username not found"})
-                    failed_count += 1
-
-                except (UserPrivacyRestrictedError, UserIsBlockedError) as e:
-                    logger.warning("Privacy restriction or bot blocked by %s: %s", lead_target, e)
-                    results.append({"username": clean_handle, "status": "restricted", "error": str(e)})
-                    failed_count += 1
-
-                except Exception as e:
-                    logger.error("Error sending promo to %s: %s", lead_target, e)
-                    results.append({"username": clean_handle, "status": "error", "error": str(e)})
-                    failed_count += 1
+                if not account_pool:
+                    logger.error("🛑 All sending accounts in pool hit restrictions. Halting Stage #%d batch.", stage)
+                    break
 
         finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            for p, cl in account_clients.items():
+                try:
+                    await cl.disconnect()
+                except Exception:
+                    pass
 
         logger.info(
             "🏁 Stage #%d batch finished. Success: %d | Failed: %d | Total: %d",
@@ -310,7 +366,6 @@ class DripEngine:
         return {
             "stage": stage,
             "status": "completed",
-            "account_phone": phone,
             "post_number": stage,
             "targeted": len(eligible_bots),
             "successful": successful_count,
@@ -326,20 +381,13 @@ class DripEngine:
         delay_seconds: float = 20.0
     ) -> Dict[str, Any]:
         """
-        Executes the 2-step anti-ban funnel for human channel admins (lead_type: 'user'):
-          - Stage 1 (Day 0): Warmup friendly greeting ('Hi' / 'Hello').
+        Executes the 2-step anti-ban funnel for human channel admins (lead_type: 'user') with multi-account rotation:
+          - Stage 1 (Day 0): Warmup friendly greeting ('Hi' / 'Hello') across rotating healthy accounts.
           - Stage 2 (Day 7): Dispatches the 1 single promotional post (Post #1).
           - Sets status to 'converted' on completion; stops permanently.
+          - Automatically fails over to next account if an account encounters PeerFlood.
         """
         import random
-        from telethon.errors import (
-            FloodWaitError,
-            PeerFloodError,
-            UserPrivacyRestrictedError,
-            UserIsBlockedError,
-            UsernameInvalidError,
-            UsernameNotOccupiedError,
-        )
 
         if stage not in [1, 2]:
             raise ValueError(f"Invalid user funnel stage {stage}. Must be 1 (Greeting) or 2 (Promo Post).")
@@ -347,17 +395,12 @@ class DripEngine:
         all_accounts = await Database.get_all_telegram_accounts()
         active_accounts = [
             a for a in all_accounts
-            if a.get("status") not in ["banned", "logged_out", "revoked", "invalid_session"]
-            and a.get("session_string")
+            if a.get("status") == "active" and a.get("session_string")
         ]
         if not active_accounts:
             raise ValueError("No active Telegram sending account available to execute human user outreach!")
 
-        # Account 1 for Stage 1, Account 2 (or rotating) for Stage 2
-        account = active_accounts[(stage - 1) % len(active_accounts)]
-        session_str = account["session_string"]
-        phone = account["phone"]
-        client = AccountManager.get_client(session_str)
+        account_pool: List[Dict[str, Any]] = list(active_accounts)
 
         eligible_users = await Database.get_eligible_users_for_warmup(stage, min_cooldown_days=7, limit=batch_size)
         if not eligible_users:
@@ -380,143 +423,194 @@ class DripEngine:
                 logger.debug("Could not load promo post preview: %s", e)
 
         logger.info(
-            "👤 [UserFunnel] Starting Stage #%d for %d human leads via Account %s.",
-            stage, len(eligible_users), phone
+            "👤 [UserFunnel] Starting Stage #%d for %d human leads with %d account(s).",
+            stage, len(eligible_users), len(account_pool)
         )
 
         results = []
         successful_count = 0
         failed_count = 0
+        account_clients: Dict[str, TelegramClient] = {}
+        account_idx = 0
 
         greetings_pool = ["Hi", "Hello", "Hey", "Hi there", "Hello!"]
 
         try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                await Database.update_telegram_account_status(phone, "logged_out")
-                raise RuntimeError(f"Account {phone} session is no longer authorized.")
-
             for idx, user_lead in enumerate(eligible_users, 1):
                 clean_handle = user_lead.get("username_clean", "").strip() or user_lead.get("username", "").lstrip("@").lower()
                 if not clean_handle:
                     continue
 
                 lead_target = f"@{clean_handle}"
+                user_dispatched = False
 
-                try:
-                    user_entity = await client.get_entity(lead_target)
+                while not user_dispatched and account_pool:
+                    current_acc = account_pool[account_idx % len(account_pool)]
+                    phone = current_acc["phone"]
+                    session_str = current_acc["session_string"]
 
-                    if stage == 1:
-                        # Step 1: Warmup greeting
-                        chosen_greet = random.choice(greetings_pool)
-                        logger.info("[%d/%d] Stage 1 Warmup: Sending '%s' to %s...", idx, len(eligible_users), chosen_greet, lead_target)
-                        await client.send_message(user_entity, chosen_greet)
+                    # Connect or retrieve client
+                    if phone not in account_clients:
+                        try:
+                            client = AccountManager.get_client(session_str)
+                            await client.connect()
+                            if not await client.is_user_authorized():
+                                await Database.update_telegram_account_status(phone, "logged_out")
+                                account_pool = [a for a in account_pool if a.get("phone") != phone]
+                                continue
+                            account_clients[phone] = client
+                        except Exception as conn_err:
+                            logger.warning("Failed connecting account %s: %s", phone, conn_err)
+                            account_pool = [a for a in account_pool if a.get("phone") != phone]
+                            continue
 
-                        await Database.advance_lead_promo_stage(
-                            username_clean=clean_handle,
-                            new_stage=1,
-                            account_phone=phone,
-                            post_number=1,
-                            message_link="user_warmup_greeting"
-                        )
-                        await Database.save_sending_report({
-                            "recipient_username": clean_handle,
-                            "recipient_type": "user",
-                            "sender_account_phone": phone,
-                            "sender_account_name": f"{account.get('first_name', '')} {account.get('last_name', '')}".strip() or phone,
-                            "post_title": "Warmup Greeting",
-                            "message_snippet": chosen_greet,
-                            "status": "sent",
-                            "sent_at": datetime.utcnow()
-                        })
+                    client = account_clients[phone]
 
-                    elif stage == 2:
-                        # Step 2: Promotional post after 7-day cooldown
-                        logger.info("[%d/%d] Stage 2 Promo: Sending promotional post to %s (Cooldown passed)...", idx, len(eligible_users), lead_target)
-                        caption = (preview.get("caption") if preview else "") or (
-                            "🚀 STILL RUNNING YOUR TELEGRAM DEAL CHANNEL MANUALLY?\n\n"
-                            "Stop wasting hours on manual posting. Let ProAffiliaters automate your workflow!\n\n"
-                            "⚡ Everything You Need:\n"
-                            "- Quick Post - Create deal posts from product links in seconds\n"
-                            "- AutoPilot - Automate deal posting 24/7\n"
-                            "- Custom Templates - Create eye-catching deal posts\n\n"
-                            "🌐 Start Now: https://proaffiliaters.com\n"
-                            "🤖 Support: @ProAffiliatersHelpBot\n"
-                            "📢 Community: @pro_affiliaters"
-                        )
-                        img_path = preview.get("image_path") if preview else None
-                        if img_path and os.path.exists(img_path):
-                            await client.send_file(entity=user_entity, file=img_path, caption=caption)
+                    try:
+                        user_entity = await client.get_entity(lead_target)
+
+                        if stage == 1:
+                            # Step 1: Warmup greeting
+                            chosen_greet = random.choice(greetings_pool)
+                            logger.info("[%d/%d] Stage 1 Warmup: Sending '%s' to %s via %s...", idx, len(eligible_users), chosen_greet, lead_target, phone)
+                            await client.send_message(user_entity, chosen_greet)
+
+                            await Database.advance_lead_promo_stage(
+                                username_clean=clean_handle,
+                                new_stage=1,
+                                account_phone=phone,
+                                post_number=1,
+                                message_link="user_warmup_greeting"
+                            )
+                            await Database.increment_account_send_count(phone)
+                            await Database.save_sending_report({
+                                "recipient_username": clean_handle,
+                                "recipient_type": "user",
+                                "sender_account_phone": phone,
+                                "sender_account_name": f"{current_acc.get('first_name', '')} {current_acc.get('last_name', '')}".strip() or phone,
+                                "post_title": "Warmup Greeting",
+                                "message_snippet": chosen_greet,
+                                "status": "sent",
+                                "sent_at": datetime.utcnow()
+                            })
+
+                        elif stage == 2:
+                            # Step 2: Promotional post after 7-day cooldown
+                            logger.info("[%d/%d] Stage 2 Promo: Sending promotional post to %s via %s...", idx, len(eligible_users), lead_target, phone)
+                            caption = (preview.get("caption") if preview else "") or (
+                                "🚀 STILL RUNNING YOUR TELEGRAM DEAL CHANNEL MANUALLY?\n\n"
+                                "Stop wasting hours on manual posting. Let ProAffiliaters automate your workflow!\n\n"
+                                "⚡ Everything You Need:\n"
+                                "- Quick Post - Create deal posts from product links in seconds\n"
+                                "- AutoPilot - Automate deal posting 24/7\n"
+                                "- Custom Templates - Create eye-catching deal posts\n\n"
+                                "🌐 Start Now: https://proaffiliaters.com\n"
+                                "🤖 Support: @ProAffiliatersHelpBot\n"
+                                "📢 Community: @pro_affiliaters"
+                            )
+                            img_path = preview.get("image_path") if preview else None
+                            if img_path and os.path.exists(img_path):
+                                await client.send_file(entity=user_entity, file=img_path, caption=caption)
+                            else:
+                                await client.send_message(entity=user_entity, message=caption)
+
+                            # Advance to stage 2 (converted / complete)
+                            await Database.advance_lead_promo_stage(
+                                username_clean=clean_handle,
+                                new_stage=2,
+                                account_phone=phone,
+                                post_number=1,
+                                message_link="user_promo_post"
+                            )
+                            await Database.increment_account_send_count(phone)
+                            await Database.save_sending_report({
+                                "recipient_username": clean_handle,
+                                "recipient_type": "user",
+                                "sender_account_phone": phone,
+                                "sender_account_name": f"{current_acc.get('first_name', '')} {current_acc.get('last_name', '')}".strip() or phone,
+                                "post_title": "Promotional Post #1",
+                                "message_snippet": caption[:100],
+                                "status": "sent",
+                                "sent_at": datetime.utcnow()
+                            })
+
+                        successful_count += 1
+                        user_dispatched = True
+                        results.append({"username": clean_handle, "status": "sent", "stage": stage, "account": phone})
+                        logger.info("  ✅ Successfully dispatched User Stage #%d to %s via %s!", stage, lead_target, phone)
+                        account_idx += 1
+
+                        if idx < len(eligible_users):
+                            await asyncio.sleep(delay_seconds)
+
+                    except PeerFloodError:
+                        logger.warning("🛑 Telegram PeerFlood on Account %s! Removing from current pool and rotating to next account...", phone)
+                        await Database.update_telegram_account_status(phone, "peer_flood_lock")
+                        account_pool = [a for a in account_pool if a.get("phone") != phone]
+                        if phone in account_clients:
+                            try:
+                                await account_clients[phone].disconnect()
+                            except Exception:
+                                pass
+                            account_clients.pop(phone, None)
+
+                        if not account_pool:
+                            results.append({"username": clean_handle, "status": "peer_flood", "error": "All accounts PeerFlood restricted"})
+                            failed_count += 1
+                            user_dispatched = True
+                            break
+
+                    except FloodWaitError as e:
+                        logger.warning("Telegram FloodWait of %ds on Account %s.", e.seconds, phone)
+                        if e.seconds > 180:
+                            await Database.update_telegram_account_status(phone, f"flood_wait_{e.seconds}s")
+                            account_pool = [a for a in account_pool if a.get("phone") != phone]
+                            if phone in account_clients:
+                                try:
+                                    await account_clients[phone].disconnect()
+                                except Exception:
+                                    pass
+                                account_clients.pop(phone, None)
+                            if not account_pool:
+                                results.append({"username": clean_handle, "status": "flood_wait", "error": f"FloodWait {e.seconds}s"})
+                                failed_count += 1
+                                user_dispatched = True
+                                break
                         else:
-                            await client.send_message(entity=user_entity, message=caption)
+                            await asyncio.sleep(e.seconds + 2)
 
-                        # Advance to stage 2 (converted / complete)
-                        await Database.advance_lead_promo_stage(
-                            username_clean=clean_handle,
-                            new_stage=2,
-                            account_phone=phone,
-                            post_number=1,
-                            message_link="user_promo_post"
-                        )
-                        await Database.save_sending_report({
-                            "recipient_username": clean_handle,
-                            "recipient_type": "user",
-                            "sender_account_phone": phone,
-                            "sender_account_name": f"{account.get('first_name', '')} {account.get('last_name', '')}".strip() or phone,
-                            "post_title": "Promotional Post #1",
-                            "message_snippet": caption[:100],
-                            "status": "sent",
-                            "sent_at": datetime.utcnow()
-                        })
+                    except (UsernameInvalidError, UsernameNotOccupiedError):
+                        await Database.update_lead_status(clean_handle, "ignored")
+                        results.append({"username": clean_handle, "status": "invalid_username", "error": "Username not found"})
+                        failed_count += 1
+                        user_dispatched = True
 
-                    successful_count += 1
-                    results.append({"username": clean_handle, "status": "sent", "stage": stage})
-                    logger.info("  ✅ Successfully dispatched User Stage #%d to %s!", stage, lead_target)
+                    except (UserPrivacyRestrictedError, UserIsBlockedError) as e:
+                        logger.warning("Privacy restriction on %s: %s", lead_target, e)
+                        results.append({"username": clean_handle, "status": "restricted", "error": str(e)})
+                        failed_count += 1
+                        user_dispatched = True
 
-                    if idx < len(eligible_users):
-                        await asyncio.sleep(delay_seconds)
+                    except Exception as e:
+                        logger.error("Error sending to %s via %s: %s", lead_target, phone, e)
+                        results.append({"username": clean_handle, "status": "error", "error": str(e)})
+                        failed_count += 1
+                        user_dispatched = True
 
-                except PeerFloodError:
-                    logger.error("🛑 Telegram PeerFlood on Account %s! Putting account in 24h cooldown.", phone)
-                    await Database.update_telegram_account_status(phone, "peer_flood_lock")
-                    results.append({"username": clean_handle, "status": "peer_flood", "error": "PeerFlood restriction"})
-                    failed_count += 1
+                if not account_pool:
+                    logger.error("🛑 All sending accounts in pool hit restrictions. Halting User Funnel Stage #%d batch.", stage)
                     break
 
-                except FloodWaitError as e:
-                    logger.warning("Telegram FloodWait of %ds on %s.", e.seconds, phone)
-                    results.append({"username": clean_handle, "status": "flood_wait", "error": f"FloodWait {e.seconds}s"})
-                    failed_count += 1
-                    if e.seconds > 180:
-                        break
-                    else:
-                        await asyncio.sleep(e.seconds + 2)
-
-                except (UsernameInvalidError, UsernameNotOccupiedError):
-                    await Database.update_lead_status(clean_handle, "ignored")
-                    results.append({"username": clean_handle, "status": "invalid_username", "error": "Username not found"})
-                    failed_count += 1
-
-                except (UserPrivacyRestrictedError, UserIsBlockedError) as e:
-                    logger.warning("Privacy restriction on %s: %s", lead_target, e)
-                    results.append({"username": clean_handle, "status": "restricted", "error": str(e)})
-                    failed_count += 1
-
-                except Exception as e:
-                    logger.error("Error sending to %s: %s", lead_target, e)
-                    results.append({"username": clean_handle, "status": "error", "error": str(e)})
-                    failed_count += 1
-
         finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            for p, cl in account_clients.items():
+                try:
+                    await cl.disconnect()
+                except Exception:
+                    pass
 
         return {
             "stage": stage,
             "status": "completed",
-            "account_phone": phone,
             "targeted": len(eligible_users),
             "successful": successful_count,
             "failed": failed_count,

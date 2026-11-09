@@ -276,6 +276,23 @@ Tracks users who started `@ProaffiliatersInfoBot`.
 
 ---
 
+## 6. Multi-Account Load Balancing & Resilient Sending Architecture
+
+To guarantee reliable outreach across thousands of leads without hitting Telegram anti-spam walls or account locks:
+
+1. **Dynamic Round-Robin Across Active Pool**:
+   - `DripEngine` and `DeliveryEngine` pull all healthy accounts with valid session strings.
+   - For newly discovered Stage 1 bots and human users, sends are distributed sequentially across accounts (Account 1 -> Account 2 -> Account 3...).
+2. **Instant `PeerFloodError` Auto-Failover**:
+   - When an account sends many messages to non-contacts and receives Telegram's `PeerFloodError`, it is tagged with `peer_flood_lock` in MongoDB.
+   - The engine **does not abort the batch**: it disconnects the restricted account, removes it from the current batch pool, and **immediately retries the current recipient with the next healthy account**.
+   - Processing continues until the entire target batch is dispatched.
+3. **Database Dispatch Tracking**:
+   - `Database.increment_account_send_count(phone)` increments daily and lifetime send counts atomically for transparent load distribution.
+
+
+---
+
 ## 7. Project Structure
 
 ```

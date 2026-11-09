@@ -416,22 +416,28 @@ async def start_manual_sending(req: StartManualSendingRequest):
     if status.get("is_running"):
         return JSONResponse(status_code=400, content={"error": "A campaign is already running. Please stop or wait for it to complete."})
 
-    success, message = await delivery_engine.start_campaign(
-        target_type=req.target_type,
-        custom_leads=req.custom_leads,
-        message_text=req.message_text,
-        image_url=req.image_url,
-        button_text=req.button_text,
-        button_url=req.button_url,
-        post_title=req.post_title or "Manual Campaign",
-        delay_seconds=req.delay_seconds,
-        max_per_account=req.max_per_account
-    )
-    if not success:
-        return JSONResponse(status_code=400, content={"error": message})
-
-    log_activity(f"Promotional campaign dispatched: {message}", "sync")
-    return {"success": True, "message": message, "status": delivery_engine.get_campaign_status()}
+    try:
+        campaign_info = await delivery_engine.start_campaign(
+            target_type=req.target_type,
+            custom_recipients=req.custom_leads,
+            custom_leads=req.custom_leads,
+            message_text=req.message_text,
+            image_url=req.image_url,
+            button_text=req.button_text,
+            button_url=req.button_url,
+            title=req.post_title or "Manual Campaign",
+            post_title=req.post_title or "Manual Campaign",
+            delay_seconds=req.delay_seconds,
+            max_per_account=req.max_per_account
+        )
+        c_title = campaign_info.get("title", "Manual Campaign")
+        c_total = campaign_info.get("total_targeted", 0)
+        msg = f"Promotional campaign dispatched: '{c_title}' targeting {c_total} leads."
+        log_activity(msg, "sync")
+        return {"success": True, "message": msg, "status": delivery_engine.get_campaign_status()}
+    except Exception as e:
+        logger.error("Failed to start manual sending campaign: %s", e)
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/sending/status")
 async def get_sending_campaign_status():
